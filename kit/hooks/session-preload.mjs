@@ -14,7 +14,7 @@
 // 주입물: [정적 org-context (~/.lively/context.md — 어댑터가 설치 시 발행, 토큰/시크릿 없음)]
 //        + [라이브 현황 (게이트웨이, 토큰 필요)]. 어느 쪽이든 있으면 주입, 둘 다 없으면 무동작(fail-open).
 //   ※ Codex 는 ~/.codex/AGENTS.md 로 정적 org-context 를 네이티브 로드하므로(어댑터가 발행), 본 훅의
-//     정적 블록은 Claude 와의 동작 패리티/이중 안전망용이다(중복돼도 무해 — 같은 비밀-없는 텍스트).
+//     정적 블록과 동일한 내용은 재주입하지 않는다. 최신 내용이 다르면 기존대로 주입한다.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, copyFileSync, realpathSync, rmSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -99,6 +99,20 @@ const readLocal = (rel) => {
 
 // 정적 org-context (토큰 무관 — cross-repo user-level 전달의 핵심). 동기·저렴, 4.5s 네트워크 타임박스 밖.
 const STATIC = readLocal("context.md");
+
+// Only suppress an exact native copy. Missing, overridden or stale instructions
+// must retain the current organization context, including new safety rules.
+export function contextForInjection(context, harnessId = HARNESS, home = homedir(), env = process.env) {
+  if (!context || harnessId !== "codex") return context;
+  try {
+    const codexHome = env.CODEX_HOME || join(home, ".codex");
+    if (existsSync(join(codexHome, "AGENTS.override.md"))) return context;
+    const native = readFileSync(join(codexHome, "AGENTS.md"), "utf8");
+    const block = /<!-- >>> lively-managed org-context[^\n]*-->\r?\n([\s\S]*?)<!-- <<< lively-managed <<< -->/.exec(native);
+    return block && block[1].trim() === context.trim() ? null : context;
+  } catch { return context; }
+}
+
 
 // 플러그인 설치 경로(#1473) — Claude Code 플러그인의 userConfig 값은 훅 프로세스에 CLAUDE_PLUGIN_OPTION_<KEY> 로 export 된다.
 //  키트 설치(curl|sh)는 ~/.lively/{token,gateway-url} 파일을 깔지만 플러그인 설치는 그 파일이 없다 — 그래서 env 폴백을 둔다.
@@ -601,7 +615,7 @@ async function main() {
   mirrorPluginCreds();                                   // 플러그인 설치면 자격을 ~/.lively 에도 굳힌다(#1473). 키트 설치면 무동작.
   // 레포 준비 실패 통지(#1155) — 로컬 마커만 읽으므로 토큰 유무와 무관하게 항상 계산한다(무토큰 세션도 코드는 필요하다).
   const repoNotice = repoStatusNotice();
-  if (!TOKEN) { emitContext(withRo([repoNotice, STATIC].filter(Boolean).join("\n\n"))); process.exit(0); }  // 토큰 없으면 라이브 스킵, 정적 org-context 만 주입(멤버 기본 상태)
+  if (!TOKEN) { emitContext(withRo([repoNotice, contextForInjection(STATIC)].filter(Boolean).join("\n\n"))); process.exit(0); }  // 토큰 없으면 라이브 스킵, 정적 org-context 만 주입(멤버 기본 상태)
   try {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms, null));
     // 런타임설정 갱신 + org-context(동적)를 병렬로 — 전부 4.5s 타임박스 안. 타임아웃이면 null.
@@ -620,11 +634,11 @@ async function main() {
     // 설정 갱신 후 판정 — session_preload 비활성이면 컨텍스트 주입만 스킵(설정은 이미 갱신돼 재활성화 가능).
     if (hookDisabled("session_preload")) { emitContext("", { reloadSkills: healed }); safeExit(0); return; }
     // 레포 통지는 org-context 앞에 — 길이가 긴 컨텍스트 뒤에 묻히면 안 되는 '지금 이 세션의 상태'다.
-    const blocks = [notice, repoNotice, orgCtx || STATIC].filter(Boolean); // 업데이트 안내 → 레포 실패 → org-context(없으면 로컬 STATIC)
+    const blocks = [notice, repoNotice, contextForInjection(orgCtx || STATIC)].filter(Boolean); // 업데이트 안내 → 레포 실패 → org-context(없으면 로컬 STATIC)
     emitContext(withRo(blocks.join("\n\n")), { reloadSkills: healed }); // 읽기전용이면 배너를 맨 앞에(#1007)
   } catch {
     // fail-open — 라이브가 터져도 정적 컨텍스트(로컬)·레포 통지는 내보낸다.
-    emitContext(withRo([repoNotice, STATIC].filter(Boolean).join("\n\n")));
+    emitContext(withRo([repoNotice, contextForInjection(STATIC)].filter(Boolean).join("\n\n")));
   }
   safeExit(0);
 }

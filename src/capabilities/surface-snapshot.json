@@ -3124,7 +3124,7 @@
   "rest": [
    "GET /api/ui/v6/project-lists"
   ],
-  "input_hash": "6c9f16e97bc4049d"
+  "input_hash": "6f79872a69a86929"
  },
  {
   "name": "project_list_create_v6",

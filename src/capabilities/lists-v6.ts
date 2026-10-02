@@ -40,6 +40,26 @@ function parseListIdOrNull(v: unknown): number | null {
 
 const writeCtxOf = (user: LivelyUser, ctx?: CapabilityCtx) => ({ actor: ctx?.actor ?? user?.userId ?? null, source: ctx?.source ?? "web" });
 
+type ProjectListIndexRow = Awaited<ReturnType<typeof listProjectLists>>[number] & {
+  locked?: boolean;
+  projects_hidden?: boolean;
+};
+
+// MCP 기본 응답은 다음 행동(리스트 선택)에 필요한 식별·소유·가시성 정보만 보낸다.
+export function projectListIndexResponse(lists: ProjectListIndexRow[], compact = true) {
+  if (!compact) return lists;
+  return lists.map((list) => ({
+    id: list.id,
+    name: list.name,
+    category: list.category,
+    folder_id: list.folder_id,
+    visibility: list.visibility,
+    project_count: list.project_count,
+    ...(list.locked ? { locked: true } : {}),
+    ...(list.projects_hidden ? { projects_hidden: true } : {}),
+  }));
+}
+
 // ── 리스트 목록 ──
 // 공개범위 게이트(#1291) — 안 보이는 리스트는 고칠 수도, 지울 수도, 대상을 바꿀 수도 없다.
 //  특히 '대상 바꾸기'가 중요하다: 이게 열려 있으면 비대상자가 잠긴 리스트를 다시 open 으로 돌리거나
@@ -72,20 +92,28 @@ async function assertListVisible(id: number, ctx?: CapabilityCtx): Promise<void>
   if (!listVisible(await visibleListIds(viewer), Number(id))) throw new HttpError(404, `리스트 #${id} 없음`);
 }
 
+const projectListIndexV6Input = {
+  compact: z.boolean().optional().describe("true면 리스트 선택에 필요한 요약만 반환. MCP에서는 생략 시 true, false면 전체 행."),
+};
+type ProjectListIndexV6Input = z.infer<z.ZodObject<typeof projectListIndexV6Input>>;
+
 const projectListIndexV6: Capability = {
   name: "project_list_index_v6",
   title: "프로젝트 리스트 목록(v6)",
-  description: "프로젝트 묶음(리스트) 전체 + 각 리스트의 멤버·프로젝트 수를 돌려준다. (프로젝트 *목록*은 project_list_v6.) 웹 보드 그룹핑 전용.",
+  description: "프로젝트 묶음(리스트)을 돌려준다. MCP 기본은 id·이름·카테고리·폴더·가시성·프로젝트 수만, compact=false 은 멤버·settings 등을 포함한 전체 행. REST 기본은 전체 행이다. (프로젝트 *목록*은 project_list_v6.)",
   scope: "memory",
-  input: {},
+  input: projectListIndexV6Input,
   expose: {
     mcp: true,
-    rest: [{ method: "GET", paths: ["/api/ui/v6/project-lists"], parse: () => ({}) }],
+    rest: [{ method: "GET", paths: ["/api/ui/v6/project-lists"],
+      // REST는 기존 웹 보드의 전체 행 계약을 유지한다; compact=true 쿼리만 명시적으로 축약한다.
+      parse: (req) => ({ compact: req.query?.compact === "1" || req.query?.compact === "true" }) }],
   },
   // 공개범위 시행(#475·#1291): viewer 신원으로 members-only 리스트를 비대상에게서 숨긴다 — REST(웹)·MCP(AI) 동일.
-  handler: async (_input: unknown, user: LivelyUser, ctx?: CapabilityCtx) => {
+  handler: async (input: ProjectListIndexV6Input, user: LivelyUser, ctx?: CapabilityCtx) => {
+    const compact = input.compact ?? ctx?.source === "mcp";
     // 어댑터가 채운 열람 신원(#1291). v2: admin 도 정규화되지 않는다 — 아래에서 메타데이터만 따로 얹는다.
-    const lists = await listProjectLists(ctx?.viewer ?? null);
+    const lists: ProjectListIndexRow[] = await listProjectLists(ctx?.viewer ?? null);
     // 관리자에게는 **잠긴 리스트의 존재·이름·대상·개수**를 함께 준다(내용은 아니다) — v2 에서 admin 우회를 없앴지만
     //  그렇다고 눈까지 감기면 회수·용량·감사 같은 운영이 불가능해진다. Notion 도 비공개 팀스페이스의 이름·멤버는 보인다.
     //  프론트는 이 행을 🔒 '내용 비공개'로 그리고, 내용을 봐야 하면 긴급 열람으로 유도한다.
@@ -94,14 +122,14 @@ const projectListIndexV6: Capability = {
       const all = await listProjectLists(null);
       for (const l of all) {
         if (seen.has(Number(l.id))) continue;
-        lists.push({ ...l, locked: true, projects_hidden: true } as typeof l);
+        lists.push({ ...l, locked: true, projects_hidden: true });
       }
     }
     // 잠긴 리스트만 팀 grant 를 동봉한다(open 이면 조회 자체가 낭비) — 설정 폼이 현재 값을 그려야 한다.
-    for (const l of lists) {
-      if ((l as any).visibility === "members") (l as any).teams = await getProjectListTeams(Number(l.id));
+    if (!compact) for (const l of lists) {
+      if (l.visibility === "members") (l as ProjectListIndexRow & { teams?: Awaited<ReturnType<typeof getProjectListTeams>> }).teams = await getProjectListTeams(Number(l.id));
     }
-    return { lists };
+    return { lists: projectListIndexResponse(lists, compact) };
   },
 };
 

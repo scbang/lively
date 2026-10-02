@@ -171,14 +171,11 @@ function projectIdFromToolInput(toolName, ti) {
   //  다섯 줄짜리 정련 목록에 또 올리면, 방금 잘 지은 이름을 모델이 한 번 더 갈아치운다.
   const nameIsMachine = String(proj.name_source || "human") === "rule";
   emit(
-    `[라이블리 — 프로젝트 정련 안내(세션당 1회)]\n` +
-    `이 세션이 붙은 **프로젝트 #${pid} «${nm.length > 60 ? nm.slice(0, 59).trimEnd() + "…" : nm}»** 는 세션 첫 지시에서 자동 생성된 **임시 껍데기**입니다 ` +
-    `(${nameIsMachine ? "제목이 아직 지시문을 자른 기계값이고 " : ""}분류·관계·지식이 비어 있습니다). 지금 본격적인 작업이 시작되니, **지금까지 알게 된 것으로 이 프로젝트를 정련하세요**:\n` +
-    (nameIsMachine ? `  ① 제목 — 무엇을 하는 일인지 드러나게: \`project_update_v6 {id: ${pid}, name: "…"}\`\n` : "") +
-    `  ② 소속 리스트(영역) — \`project_list_index_v6\` 로 목록을 보고: \`project_set_list_v6 {id: ${pid}, list_id: <id>}\`\n` +
-    `  ③ 선행·후속 — 이 일이 기존 프로젝트의 후속이면: \`project_link_project_v6 {id: ${pid}, to: <선행 id>}\` (후보는 검색이 아니라 **대화에서 사람이 언급한 것·직전에 하던 일**에서 찾고, 애매하면 사람에게 물어보세요)\n` +
-    `  ④ 필요·산출지식 — \`project_recommend_knowledge_v6 {id: ${pid}}\` 로 확인해 \`project_link_knowledge_v6(required)\`, 이 세션이 만드는 지식은 끝나기 전 \`produced\` 로\n` +
-    `  ⑤ 본문 — 목표·범위를 \`project_update_v6 {id: ${pid}, append_description: "…"}\` 로 보탭니다(**첫 지시 원문은 지우지 마세요** — append 는 원문을 보존합니다)\n` +
+    `[라이블리 — 프로젝트 #${pid} 정리(세션당 1회)]\n` +
+    `자동 생성된 프로젝트 «${nm.length > 60 ? nm.slice(0, 59).trimEnd() + "…" : nm}»입니다. 현재 작업을 계속하고, 알게 된 사실로 제목·목표·범위를 한 번에 정리하세요. 첫 지시 원문은 append_description으로 보존합니다.\n` +
+    (nameIsMachine ? `제목은 project_update_v6 {id: ${pid}, name: "…"}로 바꿉니다.\n` : "") +
+    `리스트는 이미 아는 적절한 항목이 있으면 연결하고, 모를 때만 project_list_index_v6의 간결한 목록(id·name·category)을 조회하세요. 이미 분류했으면 반복하지 않습니다.\n` +
+    `관계는 사람이 지목한 선행 작업이 있을 때만, 지식은 실제로 필요하거나 새 산출물이 생겼을 때만 연결하세요. 정리만을 위한 추천 검색이나 새 지식 생성은 필요 없습니다.\n` +
     moveHint(pid) +
     "지금 호출하려던 툴은 그대로 진행하면 됩니다(이 안내는 아무것도 막지 않습니다).");
 })().then(() => process.exit(0)).catch(() => process.exit(0));
