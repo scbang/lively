@@ -461,10 +461,11 @@ export function sectionHeadingOk(heading: string | null, body: string): boolean 
 // LLM 판정기는 두 글의 차이를 항목으로 적고, 항목마다 «사실이 달라졌나» 를 스스로 표시한다. 통과·탈락은 그 표시로만 가른다.
 //  종전 판정은 missing·added·changed 배열이 비었는지로 갈라, 판정기가 «표현 요소라 사실 변화 아님» 이라고 적은 항목까지
 //  탈락으로 셌다(top-16 dry-run 에서 의미 탈락 13건 중 다수). 표시는 두 신호가 맞을 때만 믿는다 — fact_changed 가 false 이고
-//  category 가 expression 일 때만 비사실로 보고, 하나라도 빠지거나 어긋나면 사실 변화로 친다(판정기의 자기모순은 탈락 쪽으로).
+//  category 가 expression 이거나, category 가 risk 이면서 riskGradePreserved 를 통과할 때만 비사실로 보고,
+//  하나라도 빠지거나 어긋나면 사실 변화로 친다(판정기의 자기모순은 탈락 쪽으로).
 
 export type MeaningKind = "missing" | "added" | "changed";
-/** 사실 범주 — expression 만 비사실이다. meta 는 원문의 모양·편집 과정을 설명하는 문장으로, 원문에 없던 주장이라 사실 추가다. */
+/** 사실 범주 — expression 만 비사실이다(risk 는 위험도 기호를 같은 등급 글로 옮긴 것만 예외, riskGradePreserved). meta 는 원문의 모양·편집 과정을 설명하는 문장으로, 원문에 없던 주장이라 사실 추가다. */
 export const MEANING_CATEGORIES = ["claim", "number", "condition", "scope", "subject", "date", "certainty", "risk", "meta", "expression"] as const;
 export type MeaningCategory = (typeof MEANING_CATEGORIES)[number];
 
@@ -483,6 +484,26 @@ const KINDS = new Set<string>(["missing", "added", "changed"]);
 const CATS = new Set<string>(MEANING_CATEGORIES);
 const asText = (x: unknown): string => (x == null ? "" : typeof x === "string" ? x : JSON.stringify(x));
 
+// 위험도 기호를 같은 등급의 글로 옮긴 것은 재작성 프롬프트가 시킨 변환이다. 그런데 판정기는 이 항목을 category=risk 로
+//  분류하면서 reason 엔 «등급 유지»라고 적는 일이 잦았다(2026-10-03 E 재처리 측정: 위험도 항목 80개 중 65개).
+//  판정기의 fact_changed=false 와 기계 대조(등급 표지의 순서·등급이 같고 기호가 실제로 글로 바뀌었다) 두 신호가
+//  모두 맞을 때만 비사실로 본다. 기호를 지우기만 했거나 🔴 를 «주의» 로 낮춘 것은 등급 열이 어긋나 그대로 탈락한다.
+// 등급 표지를 등장 순서대로 뽑아 «등급 열»로 비교한다 — 개수만 보면 이웃한 두 문장의 높음·중간이 서로 바뀐 재작성본도 통과한다.
+//  🟠·🚨 는 프롬프트가 글 대응을 정하지 않았으니 그대로 남아야 하는 표지로 둔다(지우면 열 길이가 달라져 탈락).
+const GRADE_TOKEN = /🔴|🟡|🟢|🟠|🚨|⚠\uFE0F?|위험도\s*[:：]\s*(?:높음|중간|낮음)|주의\s*[:：]/gu;
+const gradeOf = (t: string): string =>
+  /🔴|높음/u.test(t) ? "high" : /🟡|중간/u.test(t) ? "mid" : /🟢|낮음/u.test(t) ? "low"
+    : t === "🟠" ? "orange" : t === "🚨" ? "siren" : "caution";
+const isSymbol = (t: string): boolean => !/위험도|주의/u.test(t);
+
+/** 원문의 위험도 기호가 재작성본에서 같은 등급의 글로 옮겨졌고, 등급 표지의 순서·등급이 그대로인가. */
+export function riskGradePreserved(orig: string, rewritten: string): boolean {
+  const a = orig.match(GRADE_TOKEN) ?? [];
+  const b = rewritten.match(GRADE_TOKEN) ?? [];
+  if (a.length !== b.length || a.some((t, i) => gradeOf(t) !== gradeOf(b[i]))) return false;
+  return a.filter(isSymbol).length > b.filter(isSymbol).length;
+}
+
 /**
  * 판정기 답 하나를 항목 목록으로 편다. swapped 는 A·B 자리를 바꿔 물은 판정이다 — missing↔added 와 a↔b 를 되돌린다.
  *  답의 모양이 아니면 null(파싱 실패). 옛 모양 {missing, added, changed} 는 표시가 없으니 전부 사실 변화로 받는다.
@@ -496,7 +517,10 @@ export function normalizeJudgement(raw: unknown, swapped: boolean): MeaningItem[
       const r = (it && typeof it === "object" ? it : { a: it }) as Record<string, unknown>;
       const kind = (KINDS.has(String(r.kind)) ? String(r.kind) : "changed") as MeaningKind;
       const category = CATS.has(String(r.category)) ? (String(r.category) as MeaningCategory) : "unknown";
-      const nonFact = r.fact_changed === false && category === "expression";
+      // 자리를 바꿔 물은 판정은 r.a 가 재작성본이다 — 등급 대조는 늘 원문→재작성본 방향으로 한다.
+      const [orig, rewritten] = swapped ? [asText(r.b), asText(r.a)] : [asText(r.a), asText(r.b)];
+      const nonFact = r.fact_changed === false
+        && (category === "expression" || (category === "risk" && riskGradePreserved(orig, rewritten)));
       return { kind, a: asText(r.a), b: asText(r.b), category, fact_changed: !nonFact, reason: asText(r.reason) };
     });
   } else if (["missing", "added", "changed"].every((k) => Array.isArray(o[k]))) {

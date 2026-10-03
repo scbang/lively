@@ -2,7 +2,7 @@
 //  예시 항목은 top-16 dry-run 리포트에서 판정기가 실제로 낸 답의 모양이다.
 // 실행: npx tsx src/v6/writing-rewrite-meaning.test.ts
 import assert from "node:assert/strict";
-import { normalizeJudgement, meaningVerdict, meaningFeedback, type MeaningItem } from "./writing-rewrite-gate.js";
+import { normalizeJudgement, meaningVerdict, meaningFeedback, riskGradePreserved, type MeaningItem } from "./writing-rewrite-gate.js";
 
 let pass = 0;
 const t = (name: string, fn: () => void) => { fn(); pass++; console.log(`ok  ${name}`); };
@@ -100,6 +100,49 @@ t("추가 항목의 피드백은 지우라고 말한다", () => {
   const [line] = meaningFeedback(norm({ items: [metaAdded] }));
   assert.match(line, /지워라/);
   assert.match(line, /\[meta\]/);
+});
+
+// 위험도 기호 → 같은 등급 글 — 예시는 2026-10-03 E 재처리 리포트에서 판정기가 risk 로 분류해 떨어뜨린 실제 항목이다.
+const riskKept = { kind: "changed", a: "🔴 **같은 논거로 `nhc` 도 탈락했다**(2026-09-04).", b: "위험도: 높음. 같은 논거로 `nhc` 도 탈락했다(2026-09-04).", category: "risk", fact_changed: false, reason: "🔴를 동일 등급 문구로 옮겨 등급 유지" };
+
+t("위험도 기호를 같은 등급의 글로 옮겼고 판정기도 사실 변화가 아니라고 하면 비사실로 본다", () => {
+  const [x] = norm({ items: [riskKept] });
+  assert.equal(x.fact_changed, false);
+  assert.equal(meaningVerdict([norm({ items: [riskKept] }), norm({ items: [] }, true)], 2).pass, true);
+});
+
+t("자리를 바꿔 물은 판정에서도 원문→재작성본 방향으로 등급을 대조한다", () => {
+  const swappedAnswer = { ...riskKept, a: riskKept.b, b: riskKept.a };
+  const [x] = norm({ items: [swappedAnswer] }, true);
+  assert.equal(x.a, riskKept.a);
+  assert.equal(x.fact_changed, false);
+});
+
+t("판정기가 사실 변화라고 하면 등급이 보존돼 보여도 사실 변화다(두 신호가 모두 맞아야 한다)", () => {
+  assert.equal(norm({ items: [{ ...riskKept, fact_changed: true }] })[0].fact_changed, true);
+});
+
+t("등급을 낮췄거나 기호만 지웠으면 판정기가 false 라 해도 사실 변화다", () => {
+  assert.equal(norm({ items: [{ ...riskKept, b: "주의: 같은 논거로 `nhc` 도 탈락했다(2026-09-04)." }] })[0].fact_changed, true);
+  assert.equal(norm({ items: [{ ...riskKept, b: "같은 논거로 `nhc` 도 탈락했다(2026-09-04)." }] })[0].fact_changed, true);
+});
+
+t("riskGradePreserved — 등급 열이 같고 기호가 실제로 글이 됐을 때만 참", () => {
+  assert.equal(riskGradePreserved("**⚠️ same-day 전제**: 랑데부", "주의: same-day 전제 — 랑데부"), true);
+  assert.equal(riskGradePreserved("**스캔 품질 하한** 🔴 성공률 최대 레버", "스캔 품질 하한 — 위험도: 높음, 성공률 최대 레버"), true);
+  assert.equal(riskGradePreserved("🔴 A 🟡 B", "위험도: 높음 — A. 위험도: 중간 — B"), true);
+  assert.equal(riskGradePreserved("🔴 A 🟡 B", "위험도: 높음 — A. B"), false);
+  assert.equal(riskGradePreserved("🟡 A", "위험도: 높음 — A"), false);
+  assert.equal(riskGradePreserved("위험도: 높음 — A", "위험도: 높음 — A"), false);
+  assert.equal(riskGradePreserved("주의가 필요하다 ⚠️", "주의가 필요하다"), false);
+  assert.equal(riskGradePreserved("⚠ 같은 날 전제", "주의: 같은 날 전제"), true);
+});
+
+t("riskGradePreserved — 등급 개수가 같아도 자리끼리 바뀌었거나 글 대응 없는 표지를 지웠으면 거짓", () => {
+  assert.equal(riskGradePreserved("🔴 A. 🟡 B", "위험도: 중간 — A. 위험도: 높음 — B"), false);
+  assert.equal(riskGradePreserved("🔴 A ⚠️ B", "주의: A. 위험도: 높음 B"), false);
+  assert.equal(riskGradePreserved("🔴 🚨 X", "위험도: 높음 X"), false);
+  assert.equal(riskGradePreserved("🔴 🚨 X", "위험도: 높음 🚨 X"), true);
 });
 
 console.log(`writing-rewrite-meaning: ${pass} passed`);
