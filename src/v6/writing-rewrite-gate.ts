@@ -86,7 +86,9 @@ function splitInline(text: string): { codes: string[]; rest: string } {
 
 // 번호 목록 표지(«1. », «2) »)는 사실이 아니라 모양이다 — arrow_chain 을 고치면 번호 목록이 생기는 게 정상이다.
 //  세 자리까지만 표지로 본다 — «2024. 그 해에» 같은 연도가 줄머리에 오면 표지가 아니라 사실이다.
-const LIST_MARKER_RE = /^(\s*)\d{1,3}[.)](?=\s)/gm;
+//  헤딩·볼드를 연 바로 뒤(«### 1) », «**1.**»)도 줄머리다 — 헤딩 기호·볼드를 정리하며 번호를 떼는 건 모양 변화다(howto-263 계열).
+//  «2\. » 는 목록으로 렌더되지 않게 이스케이프한 같은 표지다 — 볼드 번호(«**2. »)를 풀 때 모델이 이렇게 쓴다(holiday-schedule-adjustment).
+const LIST_MARKER_RE = /^(\s*(?:#{1,6}\s+)?(?:\*\*|__)?)\d{1,3}\\?[.)](?=\s|\*\*|__|$)/gm;
 // 천단위 쉼표는 뒤에 정확히 세 자리일 때만 토큰에 붙인다 — «1,2,3» 같은 나열은 숫자 셋이다.
 //  앞의 '-' 는 글자·숫자 뒤가 아닐 때만 부호로 본다 — «-5도»→«5도» 는 뜻이 뒤집히지만 날짜·범위의 '-' 는 부호가 아니다.
 const NUMBER_RE = /(?:(?<![\p{L}\p{N}])-)?\d+(?:,\d{3}(?!\d))*(?:\.\d+)*(?:-\d+)*%?/gu;
@@ -240,6 +242,32 @@ function subtractAllowance(xs: string[], allow: Map<string, number>, otherSide: 
   return out;
 }
 
+const codeInner = (code: string): string => code.replace(/^(`+)([\s\S]*)\1$/, "$2").trim();
+const occurrences = (hay: string, needle: string): number => (needle ? hay.split(needle).length - 1 : 0);
+
+/**
+ * 백틱만 씌우거나 벗긴 인라인 코드는 위반에서 뺀다 — 글자는 그대로고 코드 표기만 바뀐 것이다(compute 의 +`OCR-A`).
+ *  면제는 반대편 서술에서 같은 글자가 그만큼 줄었을 때(씌움) 또는 늘었을 때(벗김)뿐이다 — 코드와 평문을 합친 등장 횟수가
+ *  보존돼야 한다. 그래야 원문에 한 번 있던 평문을 두 군데 코드로 만드는 것, 코드 안 글자를 바꾸는 것(`\"`→`"`)은 계속 잡힌다.
+ */
+function exemptBacktickOnly(before: RewriteDoc, after: RewriteDoc, missing: string[], added: string[]): { missing: string[]; added: string[] } {
+  if (!missing.length && !added.length) return { missing, added };
+  const pb = proseParts(before).prose, pa = proseParts(after).prose;
+  const keep = (xs: string[], gain: (s: string) => number): string[] => {
+    const used = new Map<string, number>();
+    return xs.filter((x) => {
+      const s = codeInner(x);
+      const n = used.get(s) ?? 0;
+      if (s && n < gain(s)) { used.set(s, n + 1); return false; }
+      return true;
+    });
+  };
+  return {
+    missing: keep(missing, (s) => occurrences(pa, s) - occurrences(pb, s)),
+    added: keep(added, (s) => occurrences(pb, s) - occurrences(pa, s)),
+  };
+}
+
 /**
  * 형식 규칙을 빼고 «사실이 그대로인가» 만 본다 — 불변식과 분량. 섹션 단위 재작성은 조각마다 이것으로 판정하고,
  *  형식 규칙(첫 줄 결론·강조 개수 등)은 문서 전체에서만 뜻이 있어 다시 합친 뒤에 본다.
@@ -267,6 +295,7 @@ export function checkInvariants(
     // 양쪽을 동시에 면제하지 않는다 — 누락 하나(제목 허용)와 추가 하나(첫 줄 허용)를 함께 면제하면 그건 X→Y 치환이다
     //  (예: 제목의 배포일을 첫 줄로 옮기며 본문 날짜를 바꿈). 정당한 경우는 늘 한 방향뿐이다.
     if (missing.length < d.missing.length && added.length < d.added.length) { missing = d.missing; added = d.added; }
+    if (k === "inlineCode") ({ missing, added } = exemptBacktickOnly(before, after, missing, added));
     if (missing.length || added.length) violations.push({ kind: `invariant:${k}`, detail: diffDetail({ missing, added }), missing, added });
   }
   for (const k of SET_FIELDS) {
@@ -379,6 +408,20 @@ export function isEligible(k: EligibilityInput, fmt: WritingFormat, now: Date | 
   return { eligible: true, targetRules: [...new Set(findings.map((x) => x.rule))], findings, mode };
 }
 
+export interface SectionOutcome { status: "skipped" | "rejected"; reason: "no_section_target" | "no_section_passed" }
+
+/**
+ * 섹션 재작성에서 재작성된 조각이 하나도 없을 때의 결과. 조각이 전부 clean·oversized 면 LLM 에 보낸 조각이 없으니
+ *  거부가 아니라 대상 없음이다 — 문서 단위 규칙(lead_missing)이 걸렸어도 첫 조각이 한도를 넘으면 이렇게 된다
+ *  (kcis-rule-2021-9-appendix-a). 시도한 조각(kept)이 하나라도 있으면 거부다. 재작성된 조각이 있으면 null.
+ */
+export function unrewrittenOutcome(report: ReadonlyArray<{ section: string }>): SectionOutcome | null {
+  if (report.some((r) => r.section === "rewritten")) return null;
+  return report.some((r) => r.section === "kept")
+    ? { status: "rejected", reason: "no_section_passed" }
+    : { status: "skipped", reason: "no_section_target" };
+}
+
 export interface DocSection {
   /** 원문 조각 그대로. 모든 조각을 이으면 원문과 글자 단위로 같다. */
   text: string;
@@ -477,6 +520,10 @@ export interface MeaningItem {
   b: string;
   category: MeaningCategory | "unknown";
   fact_changed: boolean;
+  /** 판정기가 적은 fact_changed 그대로 — 위 fact_changed 는 범주 대조까지 거친 값이라, 이동 대조(meaningVerdict)는 이것을 본다. */
+  judge_fact_changed: boolean;
+  /** 원문 대목이 재작성본 전문에 그대로 있어 이동으로 받은 항목(meaningVerdict). */
+  moved?: boolean;
   reason: string;
 }
 
@@ -521,11 +568,11 @@ export function normalizeJudgement(raw: unknown, swapped: boolean): MeaningItem[
       const [orig, rewritten] = swapped ? [asText(r.b), asText(r.a)] : [asText(r.a), asText(r.b)];
       const nonFact = r.fact_changed === false
         && (category === "expression" || (category === "risk" && riskGradePreserved(orig, rewritten)));
-      return { kind, a: asText(r.a), b: asText(r.b), category, fact_changed: !nonFact, reason: asText(r.reason) };
+      return { kind, a: asText(r.a), b: asText(r.b), category, fact_changed: !nonFact, judge_fact_changed: r.fact_changed !== false, reason: asText(r.reason) };
     });
   } else if (["missing", "added", "changed"].every((k) => Array.isArray(o[k]))) {
     items = (["missing", "added", "changed"] as const).flatMap((kind) => (o[kind] as unknown[]).map((x): MeaningItem => ({
-      kind, a: kind === "added" ? "" : asText(x), b: kind === "added" ? asText(x) : "", category: "unknown", fact_changed: true, reason: "",
+      kind, a: kind === "added" ? "" : asText(x), b: kind === "added" ? asText(x) : "", category: "unknown", fact_changed: true, judge_fact_changed: true, reason: "",
     })));
   } else return null;
   if (!swapped) return items;
@@ -537,13 +584,26 @@ export interface MeaningVerdict {
   pass: boolean;
   /** 사실 변화 항목 — 하나라도 있으면 탈락이고, 재작성 모델에 되돌려 줄 것도 이것뿐이다. */
   factual: MeaningItem[];
-  /** 판정기가 표현 차이로 표시한 항목 — 보고서에만 남긴다. */
+  /** 판정기가 표현 차이로 표시한 항목과 이동으로 받은 항목 — 보고서에만 남긴다. */
   ignored: MeaningItem[];
 }
 
-/** 판정 여러 번의 항목을 합쳐 통과를 가른다. 통과는 요구 횟수를 다 채우고 사실 변화가 하나도 없을 때뿐이다. */
-export function meaningVerdict(runs: MeaningItem[][], requiredRuns: number): MeaningVerdict {
-  const all = runs.flat();
+const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
+export const MOVED_MIN_CHARS = 8;
+
+/**
+ * 판정 여러 번의 항목을 합쳐 통과를 가른다. 통과는 요구 횟수를 다 채우고 사실 변화가 하나도 없을 때뿐이다.
+ *  rewritten(재작성본 전문)을 주면 이동 대조를 한다: 판정기가 fact_changed=false 라 했고 원문 쪽 대목이 재작성본에 공백만 빼고
+ *  그대로 있으면, 범주(meta·date·claim)와 무관하게 «옮겨졌을 뿐» 으로 받는다. 판정기는 제목 날짜·부제를 첫 줄로 옮긴 것을
+ *  reason 엔 «값은 그대로» 라 적고 category 는 meta 로 달아 떨어뜨렸다(r2 재처리, cis-socket-buildchain 등 5건).
+ *  reason 은 믿지 않고 원문 글자가 재작성본에 남았는지로만 확인한다 — 마크다운 기호까지 맞아야 하니 볼드·헤딩을 벗긴 대목은 못 건진다.
+ */
+export function meaningVerdict(runs: MeaningItem[][], requiredRuns: number, rewritten?: RewriteDoc): MeaningVerdict {
+  const hay = rewritten ? squash(`${String(rewritten.title ?? "")}\n${String(rewritten.body_md ?? "")}`) : "";
+  // 짧은 값("40"·"높음")은 문서 다른 자리에 같은 글자가 흔해 치환이 이동으로 새므로 대조하지 않는다.
+  const isMoved = (x: MeaningItem): boolean =>
+    !!hay && x.fact_changed && !x.judge_fact_changed && squash(x.a).length >= MOVED_MIN_CHARS && hay.includes(squash(x.a));
+  const all = runs.flat().map((x) => (isMoved(x) ? { ...x, fact_changed: false, moved: true } : x));
   const factual = all.filter((x) => x.fact_changed);
   const ignored = all.filter((x) => !x.fact_changed);
   return { pass: runs.length >= requiredRuns && factual.length === 0, factual, ignored };

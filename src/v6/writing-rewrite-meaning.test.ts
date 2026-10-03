@@ -145,4 +145,60 @@ t("riskGradePreserved — 등급 개수가 같아도 자리끼리 바뀌었거�
   assert.equal(riskGradePreserved("🔴 🚨 X", "위험도: 높음 🚨 X"), true);
 });
 
+// 옮겨졌을 뿐인 항목 — 판정기가 fact_changed=false 로 적고도 category 를 meta·date·claim 으로 달아 탈락하던 r2 사례의 모양이다.
+const movedDate = { kind: "changed", a: "Docker Hub openjdk 17 태그 소멸 (2026-08-27 발견)", b: "2026-08-27 에 발견한 Docker Hub openjdk 17 태그 소멸", category: "meta", fact_changed: false, reason: "제목의 날짜가 본문 첫머리로 옮겨졌을 뿐 값은 그대로다" };
+const rewrittenDoc = { title: "Docker Hub 태그 소멸", body_md: "결론 한 줄.\n\n## 경위\n\nDocker Hub openjdk 17 태그   소멸\n(2026-08-27 발견) 뒤 base 를 바꿨다." };
+
+t("fact_changed=false 이고 원문 대목이 재작성본 전문에 그대로 있으면 이동으로 보고 통과한다", () => {
+  const v = meaningVerdict([norm({ items: [movedDate] }), norm({ items: [] }, true)], 2, rewrittenDoc);
+  assert.equal(v.pass, true);
+  assert.equal(v.ignored[0].moved, true);
+  assert.equal(v.ignored[0].fact_changed, false);
+});
+
+t("이동 대조는 자리를 바꿔 물은 판정에서도 원문 쪽 대목으로 한다", () => {
+  const swappedAnswer = { ...movedDate, kind: "changed", a: movedDate.b, b: movedDate.a };
+  assert.equal(meaningVerdict([norm({ items: [swappedAnswer] }, true)], 1, rewrittenDoc).pass, true);
+  // 재작성본 쪽 대목(b)만 전문에 있는 건 이동이 아니다.
+  const onlyRewritten = { title: "Docker Hub 태그 소멸", body_md: "2026-08-27 에 발견한 Docker Hub openjdk 17 태그 소멸" };
+  assert.equal(meaningVerdict([norm({ items: [swappedAnswer] }, true)], 1, onlyRewritten).pass, false);
+});
+
+t("판정기가 fact_changed=true 라 하면 대목이 전문에 있어도 사실 변화다", () => {
+  assert.equal(meaningVerdict([norm({ items: [{ ...movedDate, fact_changed: true }] })], 1, rewrittenDoc).pass, false);
+});
+
+t("원문 대목이 전문에 없으면 판정기가 false 라 해도 사실 변화다", () => {
+  const v = meaningVerdict([norm({ items: [{ ...movedDate, a: "Docker Hub openjdk 17 태그 소멸 (2026-08-28 발견)" }] })], 1, rewrittenDoc);
+  assert.equal(v.pass, false);
+  assert.equal(v.factual[0].moved, undefined);
+});
+
+t("이동 대조는 공백만 맞춘다 — 볼드·헤딩 기호가 빠진 대목은 그대로 있는 것이 아니다", () => {
+  const bold = { ...movedDate, a: "**Docker Hub openjdk 17 태그 소멸** (2026-08-27 발견)" };
+  assert.equal(meaningVerdict([norm({ items: [bold] })], 1, rewrittenDoc).pass, false);
+});
+
+t("짧은 원문 대목은 문서 다른 자리와 우연히 겹칠 수 있어 이동으로 받지 않는다", () => {
+  // 재작성본에 "2026" 이 있어도 값 치환일 수 있다 — 하한 미만은 판정기 말과 무관하게 사실 변화로 남긴다.
+  const short = { ...movedDate, a: "2026", b: "2025" };
+  const v = meaningVerdict([norm({ items: [short] })], 1, rewrittenDoc);
+  assert.equal(v.pass, false);
+  assert.equal(v.factual[0].moved, undefined);
+});
+
+t("원문 쪽 대목이 빈 추가 항목은 이동이 될 수 없다", () => {
+  assert.equal(meaningVerdict([norm({ items: [{ ...metaAdded, fact_changed: false }] })], 1, rewrittenDoc).pass, false);
+});
+
+t("재작성본을 주지 않으면 이동 대조 없이 종전대로 가른다", () => {
+  assert.equal(meaningVerdict([norm({ items: [movedDate] })], 1).pass, false);
+});
+
+t("이동으로 받은 항목은 재시도 피드백에 싣지 않는다", () => {
+  const v = meaningVerdict([norm({ items: [movedDate, rangeChanged] })], 1, rewrittenDoc);
+  assert.equal(v.factual.length, 1);
+  assert.deepEqual(meaningFeedback([...v.factual, ...v.ignored]).length, 1);
+});
+
 console.log(`writing-rewrite-meaning: ${pass} passed`);
