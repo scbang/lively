@@ -243,10 +243,10 @@ function subtractAllowance(xs: string[], allow: Map<string, number>, otherSide: 
 }
 
 const codeInner = (code: string): string => code.replace(/^(`+)([\s\S]*)\1$/, "$2").trim();
-// ASCII 식별자 경계로만 센다 — 부분문자열로 세면 지운 `id` 가 평문 "identity" 로, 새 `a` 가 사라진 "data" 로 상쇄돼
-//  코드 소실이 면제된다. 한글 조사가 바로 붙은 평문(retry_max이다)은 경계로 보아 계속 센다.
+// 낱말 경계로만 센다 — 부분문자열로 세면 지운 `id` 가 평문 "identity" 로, 새 `a` 가 사라진 "data" 로 상쇄돼
+//  코드 소실이 면제된다. 한글 조사는 오른쪽에만 붙으므로 오른쪽은 ASCII 경계만 본다(retry_max이다 는 계속 센다).
 const occurrences = (hay: string, needle: string): number =>
-  needle ? (hay.match(new RegExp(`(?<![A-Za-z0-9_])${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_])`, "g")) ?? []).length : 0;
+  needle ? (hay.match(new RegExp(`(?<![\\p{L}\\p{N}_])${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_])`, "gu")) ?? []).length : 0;
 
 /**
  * 백틱만 씌우거나 벗긴 인라인 코드는 위반에서 뺀다 — 글자는 그대로고 코드 표기만 바뀐 것이다(compute 의 +`OCR-A`).
@@ -261,7 +261,8 @@ function exemptBacktickOnly(before: RewriteDoc, after: RewriteDoc, missing: stri
     return xs.filter((x) => {
       const s = codeInner(x);
       const n = used.get(s) ?? 0;
-      if (s && n < gain(s)) { used.set(s, n + 1); return false; }
+      // 구두점뿐인 코드(`.`·`/`)는 경계가 의미 없어 문장 하나만 늘어도 상쇄되므로 면제하지 않는다.
+      if (s && /[\p{L}\p{N}]/u.test(s) && n < gain(s)) { used.set(s, n + 1); return false; }
       return true;
     });
   };
@@ -298,6 +299,7 @@ export function checkInvariants(
     // 양쪽을 동시에 면제하지 않는다 — 누락 하나(제목 허용)와 추가 하나(첫 줄 허용)를 함께 면제하면 그건 X→Y 치환이다
     //  (예: 제목의 배포일을 첫 줄로 옮기며 본문 날짜를 바꿈). 정당한 경우는 늘 한 방향뿐이다.
     if (missing.length < d.missing.length && added.length < d.added.length) { missing = d.missing; added = d.added; }
+    // 백틱 면제는 이 가드 밖이라 양쪽을 함께 면제할 수 있다 — 글자 수가 보존된 표기 교환(`foo` 와 bar → foo 와 `bar`)이라 치환이 아니다.
     if (k === "inlineCode") ({ missing, added } = exemptBacktickOnly(before, after, missing, added));
     if (missing.length || added.length) violations.push({ kind: `invariant:${k}`, detail: diffDetail({ missing, added }), missing, added });
   }

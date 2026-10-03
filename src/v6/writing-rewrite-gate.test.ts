@@ -297,6 +297,16 @@ t("inlineCode: 한글 조사가 붙은 평문으로 백틱만 벗기면 violatio
   const after = doc(CLEAN_TITLE, `${LEAD}\n\n키는 retry_max이다.\n\n${FILLER}`);
   assert.ok(!hasKind(checkRewrite(before, after, fmt), "invariant:inlineCode"));
 });
+t("inlineCode: 구두점뿐인 코드를 지우면 문장부호가 늘어도 violation(`.` 소실)", () => {
+  const before = doc(CLEAN_TITLE, `${LEAD}\n\n구분자는 \`.\` 다.\n\n${FILLER}`);
+  const after = doc(CLEAN_TITLE, `${LEAD}\n\n구분자는 없다. 추가 문장이다.\n\n${FILLER}`);
+  assert.ok(hasKind(checkRewrite(before, after, fmt), "invariant:inlineCode"));
+});
+t("inlineCode: 한글 낱말 속에 든 한글 코드는 백틱 벗김으로 보지 않는다(가한글키)", () => {
+  const before = doc(CLEAN_TITLE, `${LEAD}\n\n키는 \`한글키\` 다.\n\n${FILLER}`);
+  const after = doc(CLEAN_TITLE, `${LEAD}\n\n키는 가한글키 다.\n\n${FILLER}`);
+  assert.ok(hasKind(checkRewrite(before, after, fmt), "invariant:inlineCode"));
+});
 t("numbers: 식별자 안의 숫자(EC2)를 결론에 한 번 더 써도 violation 없음", () => {
   const before = doc(CLEAN_TITLE, `${LEAD}\n\nSCF EC2 태그가 뒤바뀐다.\n\n${FILLER}`);
   const after = doc(CLEAN_TITLE, `EC2 태그 drift 는 무시한다.\n\n${LEAD}\n\nSCF EC2 태그가 뒤바뀐다.\n\n${FILLER}`);
