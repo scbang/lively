@@ -282,6 +282,21 @@ t("inlineCode: 원문 평문보다 많이 백틱을 씌우면 violation(새 코�
   const after = doc(CLEAN_TITLE, `${LEAD}\n\n문서 인식은 \`OCR-A\` 가 맡는다. 예비도 \`OCR-A\` 다.\n\n${FILLER}`);
   assert.ok(hasKind(checkRewrite(before, after, fmt), "invariant:inlineCode"));
 });
+t("inlineCode: 지운 코드가 평문 단어 속 글자로만 남으면 violation(`id` → identity)", () => {
+  const before = doc(CLEAN_TITLE, `${LEAD}\n\n필드 \`id\` 를 보낸다.\n\n${FILLER}`);
+  const after = doc(CLEAN_TITLE, `${LEAD}\n\n필드를 보낸다. identity 를 확인한다.\n\n${FILLER}`);
+  assert.ok(hasKind(checkRewrite(before, after, fmt), "invariant:inlineCode"));
+});
+t("inlineCode: 새 코드가 사라진 평문 단어 속 글자로만 있었으면 violation(data → `a`)", () => {
+  const before = doc(CLEAN_TITLE, `${LEAD}\n\ndata 를 저장한다.\n\n${FILLER}`);
+  const after = doc(CLEAN_TITLE, `${LEAD}\n\n\`a\` 를 저장한다.\n\n${FILLER}`);
+  assert.ok(hasKind(checkRewrite(before, after, fmt), "invariant:inlineCode"));
+});
+t("inlineCode: 한글 조사가 붙은 평문으로 백틱만 벗기면 violation 아님(retry_max이다)", () => {
+  const before = doc(CLEAN_TITLE, `${LEAD}\n\n키는 \`retry_max\` 이다.\n\n${FILLER}`);
+  const after = doc(CLEAN_TITLE, `${LEAD}\n\n키는 retry_max이다.\n\n${FILLER}`);
+  assert.ok(!hasKind(checkRewrite(before, after, fmt), "invariant:inlineCode"));
+});
 t("numbers: 식별자 안의 숫자(EC2)를 결론에 한 번 더 써도 violation 없음", () => {
   const before = doc(CLEAN_TITLE, `${LEAD}\n\nSCF EC2 태그가 뒤바뀐다.\n\n${FILLER}`);
   const after = doc(CLEAN_TITLE, `EC2 태그 drift 는 무시한다.\n\n${LEAD}\n\nSCF EC2 태그가 뒤바뀐다.\n\n${FILLER}`);

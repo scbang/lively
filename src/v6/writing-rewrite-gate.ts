@@ -243,7 +243,10 @@ function subtractAllowance(xs: string[], allow: Map<string, number>, otherSide: 
 }
 
 const codeInner = (code: string): string => code.replace(/^(`+)([\s\S]*)\1$/, "$2").trim();
-const occurrences = (hay: string, needle: string): number => (needle ? hay.split(needle).length - 1 : 0);
+// ASCII 식별자 경계로만 센다 — 부분문자열로 세면 지운 `id` 가 평문 "identity" 로, 새 `a` 가 사라진 "data" 로 상쇄돼
+//  코드 소실이 면제된다. 한글 조사가 바로 붙은 평문(retry_max이다)은 경계로 보아 계속 센다.
+const occurrences = (hay: string, needle: string): number =>
+  needle ? (hay.match(new RegExp(`(?<![A-Za-z0-9_])${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_])`, "g")) ?? []).length : 0;
 
 /**
  * 백틱만 씌우거나 벗긴 인라인 코드는 위반에서 뺀다 — 글자는 그대로고 코드 표기만 바뀐 것이다(compute 의 +`OCR-A`).
@@ -590,11 +593,14 @@ export interface MeaningVerdict {
 
 const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
 export const MOVED_MIN_CHARS = 8;
+// 이동으로 받을 수 있는 범주. 서술 주장(claim·condition·scope·certainty)은 원문 문장을 그대로 두고 상반 주장을 덧붙여도
+//  원문 대목이 남으므로 이동 대조로는 가를 수 없다 — 관측된 오탐(제목 날짜·부제를 첫 줄로 옮김)의 범주만 연다.
+const MOVABLE_CATEGORIES = new Set<string>(["meta", "date", "subject"]);
 
 /**
  * 판정 여러 번의 항목을 합쳐 통과를 가른다. 통과는 요구 횟수를 다 채우고 사실 변화가 하나도 없을 때뿐이다.
  *  rewritten(재작성본 전문)을 주면 이동 대조를 한다: 판정기가 fact_changed=false 라 했고 원문 쪽 대목이 재작성본에 공백만 빼고
- *  그대로 있으면, 범주(meta·date·claim)와 무관하게 «옮겨졌을 뿐» 으로 받는다. 판정기는 제목 날짜·부제를 첫 줄로 옮긴 것을
+ *  그대로 있으면 meta·date·subject 범주에 한해 «옮겨졌을 뿐» 으로 받는다. 판정기는 제목 날짜·부제를 첫 줄로 옮긴 것을
  *  reason 엔 «값은 그대로» 라 적고 category 는 meta 로 달아 떨어뜨렸다(r2 재처리, cis-socket-buildchain 등 5건).
  *  reason 은 믿지 않고 원문 글자가 재작성본에 남았는지로만 확인한다 — 마크다운 기호까지 맞아야 하니 볼드·헤딩을 벗긴 대목은 못 건진다.
  */
@@ -602,7 +608,8 @@ export function meaningVerdict(runs: MeaningItem[][], requiredRuns: number, rewr
   const hay = rewritten ? squash(`${String(rewritten.title ?? "")}\n${String(rewritten.body_md ?? "")}`) : "";
   // 짧은 값("40"·"높음")은 문서 다른 자리에 같은 글자가 흔해 치환이 이동으로 새므로 대조하지 않는다.
   const isMoved = (x: MeaningItem): boolean =>
-    !!hay && x.fact_changed && !x.judge_fact_changed && squash(x.a).length >= MOVED_MIN_CHARS && hay.includes(squash(x.a));
+    !!hay && x.fact_changed && !x.judge_fact_changed && MOVABLE_CATEGORIES.has(x.category)
+    && squash(x.a).length >= MOVED_MIN_CHARS && hay.includes(squash(x.a));
   const all = runs.flat().map((x) => (isMoved(x) ? { ...x, fact_changed: false, moved: true } : x));
   const factual = all.filter((x) => x.fact_changed);
   const ignored = all.filter((x) => !x.fact_changed);

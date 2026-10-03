@@ -187,6 +187,14 @@ t("짧은 원문 대목은 문서 다른 자리와 우연히 겹칠 수 있어 �
   assert.equal(v.factual[0].moved, undefined);
 });
 
+t("서술 주장(claim)은 원문 대목이 남아 있어도 이동으로 받지 않는다 — 상반 주장을 덧붙인 것일 수 있다", () => {
+  const doc = { title: "배포 절차", body_md: "실제로는 자동 배포다.\n\n배포는 수동 승인 뒤에만 진행한다." };
+  const claim = { kind: "changed", a: "배포는 수동 승인 뒤에만 진행한다", b: "실제로는 자동 배포다", category: "claim", fact_changed: false, reason: "문장이 옮겨졌을 뿐이다" };
+  const v = meaningVerdict([norm({ items: [claim] })], 1, doc);
+  assert.equal(v.pass, false);
+  assert.equal(v.factual[0].moved, undefined);
+});
+
 t("원문 쪽 대목이 빈 추가 항목은 이동이 될 수 없다", () => {
   assert.equal(meaningVerdict([norm({ items: [{ ...metaAdded, fact_changed: false }] })], 1, rewrittenDoc).pass, false);
 });
