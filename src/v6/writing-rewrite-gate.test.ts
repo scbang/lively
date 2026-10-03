@@ -299,7 +299,12 @@ t("inlineCode: 한글 조사가 붙은 평문으로 백틱만 벗기면 violatio
 });
 t("inlineCode: 구두점뿐인 코드를 지우면 문장부호가 늘어도 violation(`.` 소실)", () => {
   const before = doc(CLEAN_TITLE, `${LEAD}\n\n구분자는 \`.\` 다.\n\n${FILLER}`);
-  const after = doc(CLEAN_TITLE, `${LEAD}\n\n구분자는 없다. 추가 문장이다.\n\n${FILLER}`);
+  const after = doc(CLEAN_TITLE, `${LEAD}\n\n구분자는 없다(참고). 추가 문장이다.\n\n${FILLER}`);
+  assert.ok(hasKind(checkRewrite(before, after, fmt), "invariant:inlineCode"));
+});
+t("inlineCode: 구두점뿐인 코드를 지우면 공백 사이 같은 기호가 늘어도 violation(`/` 소실)", () => {
+  const before = doc(CLEAN_TITLE, `${LEAD}\n\n구분자는 \`/\` 다.\n\n${FILLER}`);
+  const after = doc(CLEAN_TITLE, `${LEAD}\n\n구분자는 없다. A / B 로 적는다.\n\n${FILLER}`);
   assert.ok(hasKind(checkRewrite(before, after, fmt), "invariant:inlineCode"));
 });
 t("inlineCode: 한글 낱말 속에 든 한글 코드는 백틱 벗김으로 보지 않는다(가한글키)", () => {

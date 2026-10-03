@@ -261,7 +261,7 @@ function exemptBacktickOnly(before: RewriteDoc, after: RewriteDoc, missing: stri
     return xs.filter((x) => {
       const s = codeInner(x);
       const n = used.get(s) ?? 0;
-      // 구두점뿐인 코드(`.`·`/`)는 경계가 의미 없어 문장 하나만 늘어도 상쇄되므로 면제하지 않는다.
+      // 구두점뿐인 코드(`.`·`/`·`->`)는 낱말 경계가 의미 없어, 공백·괄호 사이에 같은 기호가 하나만 늘어도(A / B, (참고).) 상쇄되므로 면제하지 않는다.
       if (s && /[\p{L}\p{N}]/u.test(s) && n < gain(s)) { used.set(s, n + 1); return false; }
       return true;
     });
