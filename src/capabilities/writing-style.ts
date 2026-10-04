@@ -125,10 +125,15 @@ export interface ReadStyleHint {
  *  에이전트가 어긋났는지를 문서마다 알 수 있어야 한다. 면제·fail-open 은 checkWriting 과 같다 — 신호 때문에 읽기가 실패하면 안 된다.
  */
 export async function readStyleHint(
-  k: { title: string | null | undefined; body_md: string | null | undefined; provenance?: string | null; is_folder?: boolean | null },
+  k: {
+    title: string | null | undefined; body_md: string | null | undefined;
+    provenance?: string | null; is_folder?: boolean | null; lifecycle?: string | null;
+  },
   loadFormat: () => Promise<WritingFormat> = getWritingFormat,
 ): Promise<{ style?: ReadStyleHint }> {
   if (isWritingExempt({ observed: k.provenance === "observed", folder: k.is_folder === true })) return {};
+  // 보관·대체된 지식은 더 이상 근거로 쓰지 않는 글이라 고치라고 안내하지 않는다.
+  if (k.lifecycle === "archived" || k.lifecycle === "superseded") return {};
   try {
     const findings = lintWriting({ title: k.title, body_md: k.body_md }, await loadFormat(), "knowledge");
     if (!findings.length) return {};
