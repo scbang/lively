@@ -42,6 +42,9 @@ export interface GateBefore {
   confidence: string | null;
   type: string | null;
   provenance: string | null;
+  /** 형식 정리 저장의 사람 편집 보호 창(save-guard) — 마지막 편집 시각·편집자. */
+  updated_at?: string | Date | null;
+  updated_by?: string | null;
 }
 
 export interface KnowledgeGate {
@@ -63,7 +66,7 @@ export async function resolveKnowledgeGate(input: GateSaveInput, ctx?: { source?
 
   const before = name
     ? (await one(itemsPool,
-      `SELECT name, title, body_md, version, lifecycle, confidence, type, provenance
+      `SELECT name, title, body_md, version, lifecycle, confidence, type, provenance, updated_at, updated_by
          FROM knowledge WHERE name=$1`, [name])) as GateBefore | undefined
     : undefined;
   const isCreate = !before;
