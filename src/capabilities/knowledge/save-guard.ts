@@ -10,6 +10,8 @@ export interface SaveGuardBefore {
   title: string | null | undefined;
   body_md: string | null | undefined;
   version: number | string;
+  /** 마지막 저장의 출처 — upsertKnowledge 가 매 저장마다 MCP 면 'ai', 그 밖은 'human' 으로 덮는다. */
+  confidence?: string | null;
   updated_at?: string | Date | null;
   updated_by?: string | null;
 }
@@ -40,15 +42,18 @@ export function assertStyleFixSafe(o: {
 }): void {
   if (!o.styleFix || o.human || !o.before) return;
   // 남이 방금 고친 글은 그 사람이 아직 손보는 중일 수 있다 — 자동 정리 배치와 같은 보호 창이다.
-  //  마지막 편집자가 저장하는 본인이면 막지 않는다: 자기가 방금 저장한 지식의 형식 안내를 받고 바로 고치는 게 기본 흐름이다.
-  //  updated_by 는 사람·에이전트를 가르지 못하므로(같은 계정) 편집자가 다르면 사람 편집으로 보고 보수적으로 막는다.
-  const ownLast = !!o.actor && o.before.updated_by === o.actor;
+  //  마지막 저장이 같은 계정의 에이전트(MCP) 저장이면 막지 않는다: 자기가 방금 저장한 지식의 형식 안내를 받고 바로 고치는 게
+  //  기본 흐름이다. updated_by 만으로는 같은 계정의 사람 웹 편집과 에이전트 저장을 못 가르므로 confidence(upsertKnowledge 가
+  //  저장 출처로 매번 덮는 값, mcp → 'ai')를 함께 본다 — 계정만 보면 그 사람이 웹에서 고치던 글을 자기 에이전트가 덮는다.
+  const ownLast = !!o.actor && o.before.updated_by === o.actor && o.before.confidence === "ai";
   if (!ownLast && isRecentlyEdited(o.before.updated_at, o.now)) {
     throw new HttpError(409,
       "다른 사람이 최근 24시간 안에 고친 지식이라 형식 정리 저장(style_fix)을 받지 않습니다 — 그 사람이 아직 손보는 중일 수 있습니다. 형식 위반은 그대로 두고, 24시간 뒤에 다시 고치세요.",
       { body: { style_fix: { rejected: "recently_edited", updated_at: o.before.updated_at ?? null, updated_by: o.before.updated_by ?? null } } });
   }
-  const violations = checkInvariants({ title: o.before.title, body_md: o.before.body_md }, o.after);
+  // knowledge.title 은 nullable 이다 — 원문에 제목이 없으면 고친 글에도 요구하지 않는다(제목 없는 지식의 형식 정리가 막히지 않게).
+  const violations = checkInvariants({ title: o.before.title, body_md: o.before.body_md }, o.after,
+    { requireTitle: !!String(o.before.title ?? "").trim() });
   if (!violations.length) return;
   const lines = violations.map((v) => `- ${v.kind}: ${v.detail}`);
   throw new HttpError(422,

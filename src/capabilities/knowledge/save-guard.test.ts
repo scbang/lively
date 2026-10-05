@@ -5,6 +5,8 @@
 //  회귀 대상 ③: 다른 사람이 방금 고친 글을 형식 정리가 덮는 것.
 //  회귀 대상 ④: 읽은 뒤 바뀐 지식을 expected_version 대조 없이 덮는 것.
 import assert from "node:assert/strict";
+
+delete process.env.ITEMS_DATABASE_URL;   // 핸들러 입구 검증이 DB 조회보다 먼저인지 본다 — 조회가 먼저면 DB 설정 오류가 먼저 튄다
 import { assertExpectedVersion, assertStyleFixSafe, type SaveGuardBefore } from "./save-guard.js";
 import { knowledgeSave } from "./authoring.js";
 import { RECENT_EDIT_MS } from "../../v6/writing-rewrite-gate.js";
@@ -67,10 +69,23 @@ t("편집이 보호 창보다 오래됐으면 통과한다", () => {
 t("편집 시각을 못 읽으면 최근 편집으로 보고 거부한다", () => {
   assert.equal(thrown(() => assertStyleFixSafe({ ...agent, styleFix: true, before: before({ updated_at: null }), after: FORMAT_ONLY }))?.status, 409);
 });
-t("마지막 편집자가 저장하는 본인이면 보호 창을 걸지 않는다(방금 쓴 글의 형식 안내를 바로 고치는 흐름)", () => {
-  assert.equal(thrown(() => assertStyleFixSafe({ ...agent, styleFix: true, before: before({ updated_at: RECENT, updated_by: "bob" }), after: FORMAT_ONLY })), null);
+t("마지막 저장이 같은 계정의 에이전트 저장이면 보호 창을 걸지 않는다(방금 쓴 글의 형식 안내를 바로 고치는 흐름)", () => {
+  const own = before({ updated_at: RECENT, updated_by: "bob", confidence: "ai" });
+  assert.equal(thrown(() => assertStyleFixSafe({ ...agent, styleFix: true, before: own, after: FORMAT_ONLY })), null);
   // 본인이어도 불변식은 그대로 건다.
-  assert.equal(thrown(() => assertStyleFixSafe({ ...agent, styleFix: true, before: before({ updated_at: RECENT, updated_by: "bob" }), after: NUMBER_CHANGED }))?.status, 422);
+  assert.equal(thrown(() => assertStyleFixSafe({ ...agent, styleFix: true, before: own, after: NUMBER_CHANGED }))?.status, 422);
+});
+t("같은 계정이라도 마지막 저장이 사람 웹 편집(confidence human)이면 보호 창을 건다", () => {
+  for (const confidence of ["human", null, undefined]) {
+    const e = thrown(() => assertStyleFixSafe({ ...agent, styleFix: true, before: before({ updated_at: RECENT, updated_by: "bob", confidence }), after: FORMAT_ONLY }));
+    assert.equal(e?.status, 409, String(confidence));
+  }
+});
+t("원문에 제목이 없으면 고친 글에도 제목을 요구하지 않는다", () => {
+  const untitled = before({ title: null });
+  assert.equal(thrown(() => assertStyleFixSafe({ ...agent, styleFix: true, before: untitled, after: { title: undefined, body_md: untitled.body_md } })), null);
+  // 원문에 제목이 있으면 비운 제목은 여전히 위반이다.
+  assert.match(thrown(() => assertStyleFixSafe({ ...agent, styleFix: true, before: before(), after: { title: "", body_md: FORMAT_ONLY.body_md } }))?.message ?? "", /empty-title/);
 });
 t("Date 객체로 온 updated_at 도 같은 기준으로 판정한다(pg 드라이버가 timestamptz 를 Date 로 준다)", () => {
   assert.equal(thrown(() => assertStyleFixSafe({ ...agent, styleFix: true, before: before({ updated_at: new Date(RECENT) }), after: FORMAT_ONLY }))?.status, 409);
@@ -105,6 +120,7 @@ t("MCP 입력 스키마에 style_fix·expected_version 이 있고 설명이 붙�
   assert.equal(input.expected_version.safeParse(0).success, false);
   assert.equal(input.expected_version.safeParse(3).success, true);
   assert.match(knowledgeSave.description, /style_fix:true 와 읽을 때의 expected_version/);
+  assert.match(knowledgeSave.description, /knowledge_set_title 로 먼저 고쳤으면 판이 올랐으니 다시 읽은 version/);
 });
 const parse = (body: Record<string, unknown>) => {
   const mount = (knowledgeSave.expose as { rest: Array<{ parse: (req: unknown) => Record<string, unknown> }> }).rest[0];
@@ -119,5 +135,23 @@ t("REST 도 style_fix·expected_version 을 핸들러로 넘기고, 정수가 �
   assert.equal(none.expected_version, undefined);
   for (const bad of ["abc", 1.5, 0]) assert.equal(thrown(() => { parse({ expected_version: bad }); })?.status, 400, String(bad));
 });
+t("REST 의 style_fix 는 boolean 만 받는다", () => {
+  assert.equal(parse({ style_fix: false }).style_fix, false);
+  for (const bad of ["true", 1, null, {}]) {
+    const e = thrown(() => { parse({ style_fix: bad }); });
+    assert.equal(e?.status, 400, String(bad));
+    assert.match(e!.message, /style_fix/);
+  }
+});
 
+{
+  // append 는 DB 를 읽기 전에 거른다(위에서 DB 주소를 지웠다).
+  const user = { userId: "t-style", email: "t@x", scopes: ["admin"] } as never;
+  let err: { status?: number; message?: string } | null = null;
+  try { await knowledgeSave.handler({ name: "k", mode: "append", body_md: "덧붙임이다.", style_fix: true } as never, user, { source: "mcp" } as never); }
+  catch (e) { err = e as { status?: number; message?: string }; }
+  assert.equal(err?.status, 400, JSON.stringify(err?.message));
+  assert.match(String(err?.message), /replace·edit/);
+  pass++; console.log("ok  append 에 style_fix 를 보내면 DB 조회 전에 400 이다");
+}
 console.log(`save-guard: ${pass} passed`);

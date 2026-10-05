@@ -138,7 +138,7 @@ export const knowledgeSave: Capability = {
     "서버가 그 필드만 조정(자르기/참조 무시)하고 본문은 그대로 저장한 뒤 응답 capped 로 무엇을 어떻게 조정했는지 알려준다. " +
     "그러니 **본문을 다시 실어 재시도하지 마라**(capped 가 왔다고 저장이 실패한 게 아니다). 잘린 제목을 고치려면 **knowledge_set_title**(name+title — 본문 불요)을 쓰고, 애초에 제목은 한 줄로 짧게 쓰고 긴 설명은 본문 첫 헤딩으로 내려라. " +
     "**서술 형식**: 조직이 서술 형식을 켜 두면 저장된 제목·본문을 그 형식에 비춰 본다. 어긋난 곳은 응답 style(findings·guide_md)로 알려 주니 뜻은 그대로 두고 mode='edit' 로 그 부분만 고쳐라. 조직이 저장 거부로 정한 규칙에 걸리면 저장되지 않고 422 에러 메시지에 고칠 곳과 가이드가 온다 — 고친 뒤 같은 호출로 다시 저장하라. " +
-    "**형식만 고치는 저장이면 style_fix:true 와 읽을 때의 expected_version 을 함께 보내라** — 서버가 원문의 사실이 그대로인지 확인해 준다. ask_human 이 붙은 위반은 사람에게 확인한 뒤 고친다.",
+    "**형식만 고치는 저장이면 style_fix:true 와 읽을 때의 expected_version 을 함께 보내라** — 서버가 원문의 사실이 그대로인지 확인해 준다. 제목을 knowledge_set_title 로 먼저 고쳤으면 판이 올랐으니 다시 읽은 version 을 보내라. ask_human 이 붙은 위반은 사람에게 확인한 뒤 고친다.",
   scope: "memory",
   input: knowledgeSaveInput,
   expose: {
@@ -173,6 +173,8 @@ export const knowledgeSave: Capability = {
         if (provenance && !["authored", "observed"].includes(provenance)) throw new HttpError(400, "provenance 는 authored|observed");
         const lifecycle = b.lifecycle ? String(b.lifecycle) : undefined;   // #638 자동 인입 pending 저장(사람 web 저작은 미전송=active)
         if (lifecycle && !["active", "pending"].includes(lifecycle)) throw new HttpError(400, "lifecycle 은 active|pending (신규 저장)");
+        // style_fix 도 같은 이유로 boolean 만 받는다 — "true" 같은 값을 버리면 형식 정리 저장이 대조 없이 통과한다.
+        if (b.style_fix !== undefined && typeof b.style_fix !== "boolean") throw new HttpError(400, "style_fix 는 boolean");
         // REST 는 zod 를 안 타므로 여기서 거른다 — 숫자가 아닌 값을 조용히 버리면 CAS 를 요청한 호출이 대조 없이 덮어쓴다.
         let expected_version: number | undefined;
         if (b.expected_version != null && b.expected_version !== "") {
@@ -199,7 +201,7 @@ export const knowledgeSave: Capability = {
           //  상한 지점이라야 REST 호출자도 '잘렸다'는 사실을 응답 capped 로 받는다(여기서 자르면 조용히 사라진다).
           change_note: b.change_note ? String(b.change_note) : undefined,
           derived_from: parseDerivedFrom(b.derived_from),                  // #4824 저장 + 원본 연결 한 번에
-          style_fix: b.style_fix === true ? true : undefined,
+          style_fix: b.style_fix as boolean | undefined,
           expected_version,
         };
       } }],
@@ -211,6 +213,10 @@ export const knowledgeSave: Capability = {
     //  조정된 값을 보게 하려면 여기여야 한다. capped(조정 보고)는 성공 return 마다 실어 호출자가 반드시 본다.
     //  MCP·REST 어느 경로로 와도 같은 판정을 받는다(REST 는 zod 를 안 타므로 이 자리가 유일한 상한 지점).
     const capped = applySoftCaps("knowledge_save", input, CAPS);
+    // append 는 원문 끝에 조각을 붙이는 저장이라 «형식만 고침»일 수 없다 — 불변식이 늘어난 수치·링크를 전부 위반으로 센다.
+    if (input.style_fix && input.mode === "append") {
+      throw new HttpError(400, "style_fix 는 replace·edit 에서만 쓸 수 있습니다 — append 는 내용을 덧붙이는 저장이라 형식 정리가 아닙니다.");
+    }
     // #1442 name 정규화 — 소프트캡 **다음에**(위에서 보낸 길이를 먼저 보고해야 하므로). store 가 upsert 직전
     //  slugify 로 정규화·절단하므로, 정규화를 store 에만 맡기면 아래 인입 게이트·공개범위 검사는 **원본 이름**을
     //  보고 store 는 **잘린 이름**을 쓰는 불일치가 생긴다: 65자 이름이면 게이트는 그 이름의 문서가 없으니 '신규'로
