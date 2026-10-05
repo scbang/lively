@@ -8,6 +8,7 @@ import { audit } from "../org/store/audit.js";
 import { getWritingFormat } from "../org/store/runtime-config.js";
 import type { WritingFormat, WritingSurface } from "../org/policies/writing-format.js";
 import { lintWriting, type WritingFinding } from "../v6/writing-lint.js";
+import { needsHumanJudgment } from "../v6/writing-rewrite-gate.js";
 
 /** 사람의 웹 편집인가 — 웹 로그인 세션이면서 앱이 대신 쓰는 호출이 아닐 때만. 앱 세션은 로그인한 사람의 신원을
  *  물려받지만 글을 쓰는 것은 앱(대개 LLM)이다. */
@@ -116,7 +117,9 @@ const READ_FINDINGS_MAX = 10;
 export interface ReadStyleHint {
   /** 위반 전체 건수 — findings 는 앞부분만 싣는다. */
   count: number;
-  findings: WritingFinding[];
+  /** ask_human — 자동 정리에서 뺀 규칙이다(writing-rewrite-gate AUTO_FIX_RULES 밖). 고치는 데 «그날이 언제였나» 같은
+   *  사실 판단이 필요해, 에이전트가 혼자 고치면 그럴듯한 값을 지어낸다. */
+  findings: Array<WritingFinding & { ask_human?: true }>;
   note: string;
 }
 
@@ -140,8 +143,8 @@ export async function readStyleHint(
     return {
       style: {
         count: findings.length,
-        findings: findings.slice(0, READ_FINDINGS_MAX),
-        note: `이 지식은 조직의 서술 형식에 어긋난 곳이 ${findings.length}건 있다. 이 지식을 작업 근거로 쓰고 있다면 지금 knowledge_save mode='edit' 로 그 부분을 고친다. 의미·사실·수치·코드 위치·[[링크]]는 그대로 두고 형식만 고치며, 저장 응답에 style 이 더는 실리지 않을 때까지(위반 0건) 반복한다. 제목은 knowledge_set_title 로 고친다.`,
+        findings: findings.slice(0, READ_FINDINGS_MAX).map((f) => (needsHumanJudgment(f.rule) ? { ...f, ask_human: true as const } : f)),
+        note: `이 지식은 조직의 서술 형식에 어긋난 곳이 ${findings.length}건 있다. 이 지식을 작업 근거로 쓰고 있다면 지금 knowledge_save mode='edit' 로 그 부분을 고친다. 의미·사실·수치·코드 위치·[[링크]]는 그대로 두고 형식만 고치며, 저장 응답에 style 이 더는 실리지 않을 때까지(위반 0건) 반복한다. 제목은 knowledge_set_title 로 고친다. ask_human 이 붙은 항목은 날짜·현행 여부·경로처럼 글에 없는 사실이 있어야 고칠 수 있으니 지어내지 말고 사람에게 확인한 뒤 고친다.`,
       },
     };
   } catch {
