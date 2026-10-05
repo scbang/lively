@@ -6,7 +6,6 @@
 //  회귀 대상 ④: 읽은 뒤 바뀐 지식을 expected_version 대조 없이 덮는 것.
 import assert from "node:assert/strict";
 
-delete process.env.ITEMS_DATABASE_URL;   // 핸들러 입구 검증이 DB 조회보다 먼저인지 본다 — 조회가 먼저면 DB 설정 오류가 먼저 튄다
 import { assertExpectedVersion, assertStyleFixSafe, type SaveGuardBefore } from "./save-guard.js";
 import { knowledgeSave } from "./authoring.js";
 import { RECENT_EDIT_MS } from "../../v6/writing-rewrite-gate.js";
@@ -145,7 +144,7 @@ t("REST 의 style_fix 는 boolean 만 받는다", () => {
 });
 
 {
-  // append 는 DB 를 읽기 전에 거른다(위에서 DB 주소를 지웠다).
+  // append 는 DB 를 읽기 전에 거른다 — 순서가 퇴행하면 DB 가드·조회 오류가 400 자리에 나와 이 단언이 깨진다.
   const user = { userId: "t-style", email: "t@x", scopes: ["admin"] } as never;
   let err: { status?: number; message?: string } | null = null;
   try { await knowledgeSave.handler({ name: "k", mode: "append", body_md: "덧붙임이다.", style_fix: true } as never, user, { source: "mcp" } as never); }
