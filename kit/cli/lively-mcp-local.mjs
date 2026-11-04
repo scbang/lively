@@ -39,6 +39,8 @@
 //      인라인 동기 블로킹이라 백그라운드가 안 된다 → 그런 건 CLI(`lively delegate`)를
 //      Bash(run_in_background)로 남긴다(지식 delegate-background-cli-not-mcp-wait).
 //      여기엔 **몇 초 안에 동기 완결되는 로컬 조작만**.
+//      예외 꼴 하나: 호출마다 시간 예산을 두고 넘으면 멈춰 done:false 를 돌려주고, 같은 호출을 다시 하면
+//      이어서 하는 도구(lively_local_nas_pull). 한 호출이 예산보다 오래 하네스를 붙잡지 않으면 된다.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { readFileSync, realpathSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
@@ -326,7 +328,12 @@ registerTool({
     additionalProperties: false,
   },
   handler: async (args, ctx) => {
-    const { nasPull } = await import("./nas-pull-core.mjs");
+    let nasPull;
+    try { ({ nasPull } = await import("./nas-pull-core.mjs")); }
+    catch (e) {
+      if (e?.code !== "ERR_MODULE_NOT_FOUND") throw e;
+      throw new Error("NAS 받기 모듈(nas-pull-core.mjs)이 이 설치에 없습니다 — `lively update` 로 키트를 갱신한 뒤 새 세션에서 다시 하세요");
+    }
     return ctx.json(await nasPull(ctx, args, { home: HOME, fetchImpl: fetch }));
   },
 });

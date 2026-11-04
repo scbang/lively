@@ -59,17 +59,10 @@ test("safeSegment: NFD 한글을 NFC 로 정규화", () => {
 
 // ───────────────────────── pOfPath ─────────────────────────
 
-test("pOfPath: UTF-8 경로를 패딩 없는 base64url 로", () => {
-  for (const p of ["/a", "/공유/자료 폴더/보고서.pdf", "/ab?>~"]) {
-    const got = pOfPath(p);
-    assert.equal(got, Buffer.from(p, "utf8").toString("base64url"), p);
-    assert.ok(!/[=+/]/.test(got), `패딩·표준 base64 문자 없음: ${got}`);
-  }
-});
-
-test("pOfPath: / 로 시작하지 않으면 앞에 / 를 붙여 인코딩", () => {
-  assert.equal(pOfPath("a"), pOfPath("/a"));
-  assert.equal(pOfPath("공유/x"), Buffer.from("/공유/x", "utf8").toString("base64url"));
+test("pOfPath: 서버 p 와 같은 꼴(UTF-8 바이트의 패딩 없는 base64url), / 로 시작하지 않으면 붙인다", () => {
+  // 게이트웨이 encodeRawPath 와의 외부 계약이라 리터럴로 고정한다(2026-11-04 운영 nas_list 의 p 와 대조: /BPM → L0JQTQ)
+  const vectors = [["/a", "L2E"], ["a", "L2E"], ["/BPM", "L0JQTQ"], ["/공유/x", "L-qzteycoC94"], ["/ab?>~", "L2FiPz5-"]];
+  for (const [path, want] of vectors) assert.equal(pOfPath(path), want, path);
 });
 
 // ───────────────────────── resolveDest ─────────────────────────
@@ -191,6 +184,21 @@ test("planFiles: 폴더를 maxDirs 개 넘게 열지 않고 truncated 에 사유
   assert.equal(typeof r.truncated, "string");
 });
 
+test("planFiles: 폴더 나열도 시간 한도(deadline)를 지켜 넘으면 멈추고 truncated 에 사유", async () => {
+  // 회귀: 나열 단계가 예산 밖이라 큰 폴더에서 호출이 수십 분 붙잡혔다(리뷰 2026-11-04)
+  const tree = {};
+  for (let i = 0; i < 50; i++) {
+    tree[`d${i}`] = [{ p: `f${i}`, path: `/d0/f${i}`, type: "file", size: 1 }];
+    if (i < 49) tree[`d${i}`].push({ p: `d${i + 1}`, path: `/d0/d${i + 1}`, type: "dir", size: 0 });
+  }
+  let t = 0;
+  const calls = [];
+  const slow = async (p) => { t += 10; return mkListDir(tree, calls)(p); };
+  const r = await planFiles([{ p: "d0", path: "/d0", type: "dir" }], slow, { now: () => t, deadline: 35 });
+  assert.ok(calls.length <= 5, `listDir 호출 ${calls.length}회`);
+  assert.equal(typeof r.truncated, "string");
+});
+
 // ───────────────────────── pullFiles ─────────────────────────
 
 const mkDownload = (map, calls = []) => async (p) => {
@@ -286,6 +294,17 @@ test("pullFiles: 쓰는 중 스트림 실패면 반쪽 파일을 남기지 않�
   assert.deepEqual(fs.readdirSync(root).sort(), ["after.txt", "keep.txt"]);
 });
 
+test("pullFiles: 받는 폴더 안의 하위 폴더가 홈 밖을 가리키는 링크면 그 밖에 쓰지 않고 failed", async () => {
+  // 회귀: 루트만 검사해 dest/B -> 바깥 링크를 따라 바깥에 파일을 만들었다(리뷰 2026-11-04)
+  const root = mkTmp();
+  const outside = mkTmp("naspull-out-");
+  fs.symlinkSync(outside, path.join(root, "B"), "junction");
+  const r = await pullFiles([{ p: "x", path: "/B/x.txt", size: 1, rel: ["B", "x.txt"] }], fs.realpathSync(root), mkDownload({ x: "a" }), { now: () => 0 });
+  assert.deepEqual(fs.readdirSync(outside), []);
+  assert.equal(r.downloaded.length, 0);
+  assert.equal(r.failed.length, 1);
+});
+
 test("pullFiles: 시작부터 budgetMs 를 넘긴 뒤엔 새 파일을 시작하지 않고 remaining 에 남은 수", async () => {
   const root = mkTmp();
   let t = 1000;
@@ -317,7 +336,7 @@ function mkCtx(listings) {
         apiCalls.push(p);
         if (!p.startsWith(LIST_PREFIX)) throw new Error(`unexpected api ${p}`);
         const key = decodeURIComponent(p.slice(LIST_PREFIX.length));
-        if (!(key in listings)) throw new Error(`404 ${key}`);
+        if (!(key in listings)) throw new Error(`게이트웨이 404 (${p})`); // ctx.api 의 실제 404 문구
         return listings[key];
       },
     },
@@ -426,6 +445,39 @@ test("nasPull: type 없는 대상은 list 실패 시 file 로 받음", async () 
   assert.equal(calls.length, 1);
   assert.equal(read(path.join(real(home), "NAS사본", "out", "doc.pdf")), "pdfbytes");
   assert.equal(r.downloaded, 1);
+});
+
+test("nasPull: type 판별 중 404 가 아닌 실패(로그인 만료 등)는 파일로 오인하지 않고 그대로 던진다", async () => {
+  const home = mkTmp();
+  const { fetchImpl, calls } = mkFetch({ px: "x" });
+  const ctx = { api: async () => { throw new Error("게이트웨이 401 (/api/ui/me/nas/list) — lively login"); }, gateway: GATEWAY, token: TOKEN };
+  await assert.rejects(nasPull(ctx, { targets: [{ p: "px", path: "/A/x.txt" }] }, { home, fetchImpl, budgetMs: 1e9, now: () => 0 }), /401/);
+  assert.equal(calls.length, 0);
+});
+
+test("nasPull: 폴더 나열이 시간 한도에 걸리면 done=false 로 멈추고, 다시 부르면 이어서 나열해 다 받는다", async () => {
+  const home = mkTmp();
+  const listings = {};
+  for (let i = 0; i < 6; i++) {
+    listings[`d${i}`] = { path: i ? `/R/d${i}` : "/R", items: [{ p: `f${i}`, path: `${i ? `/R/d${i}` : "/R"}/f${i}.txt`, type: "file", size: 1 }] };
+    if (i < 5) listings[`d${i}`].items.push({ p: `d${i + 1}`, path: `/R/d${i + 1}`, type: "dir", size: 0 });
+  }
+  const bytes = Object.fromEntries(Array.from({ length: 6 }, (_, i) => [`f${i}`, "z"]));
+  let t = 0;
+  const base = mkCtx(listings).ctx;
+  const ctx = { ...base, api: async (...a) => { t += 10; return base.api(...a); } };
+  const { fetchImpl } = mkFetch(bytes);
+  const first = await nasPull(ctx, { targets: [{ p: "d0", path: "/R", type: "dir" }], dest: "out" }, { home, fetchImpl, budgetMs: 25, now: () => t });
+  assert.equal(first.done, false);
+  assert.equal(first.downloaded, 0);
+  let r = first;
+  for (let k = 0; k < 10 && !r.done; k++) r = await nasPull(ctx, { targets: [{ p: "d0", path: "/R", type: "dir" }], dest: "out" }, { home, fetchImpl, budgetMs: 25, now: () => t });
+  assert.equal(r.done, true);
+  const out = path.join(real(home), "NAS사본", "out", "R");
+  assert.equal(read(path.join(out, "f0.txt")), "z");
+  for (let i = 1; i < 6; i++) assert.equal(read(path.join(out, `d${i}`, `f${i}.txt`)), "z");
+  // 다 받으면 이어받기 기록을 남기지 않는다
+  assert.deepEqual(fs.readdirSync(path.join(real(home), "NAS사본", "out")).filter((n) => n.startsWith(".")), []);
 });
 
 test("nasPull: type 없는 대상이 list 성공이면 응답 path 를 이름으로 한 dir", async () => {

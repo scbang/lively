@@ -4,9 +4,11 @@
 //
 //  · 받는 자리는 홈 아래만이다. 상대 경로는 ~/NAS사본 기준이다. 웹 세션의 작업 폴더(프로젝트 공유폴더)는 같은 프로젝트의
 //    다른 구성원도 보는 자리라, 거기에 받으면 그 사람의 NAS 권한 밖 파일이 넘어간다.
-//  · MCP 호출은 하네스를 붙잡는 동기 호출이라(lively-mcp-local.mjs 머리말) 한 번에 budgetMs 만 받고 멈춘다.
-//    이미 같은 크기로 받은 파일은 건너뛰므로 같은 호출을 다시 부르면 이어서 받는다.
-import { mkdirSync, statSync, renameSync, unlinkSync, createWriteStream, realpathSync, existsSync } from "node:fs";
+//  · MCP 호출은 하네스를 붙잡는 동기 호출이라(lively-mcp-local.mjs 머리말) 한 번에 budgetMs 만 쓰고 멈춘다. 폴더 나열도 이 예산 안이다
+//    — 폴더 하나마다 게이트웨이가 FTP 로그인부터 다시 하므로 큰 폴더는 나열만 수 분이 걸린다. 끊긴 나열은 dest 의 .nas-pull-<키>.json 에
+//    남겨 다음 호출이 이어서 나열하고, 받기는 같은 크기 파일을 건너뛰는 것으로 이어받는다. 다 받으면 그 파일을 지운다.
+import { mkdirSync, statSync, lstatSync, renameSync, unlinkSync, createWriteStream, realpathSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join, resolve, dirname, basename, isAbsolute, sep } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -15,13 +17,21 @@ export const DEFAULT_BUDGET_MS = 50_000;
 export const MAX_FILES = 3000;
 export const MAX_DIRS = 2000;
 export const DEFAULT_DEST_DIR = "NAS사본";
+/** 파일 하나를 받는 최대 시간. 큰 스캔 묶음도 넉넉히 들어오되, 멈춘 전송이 호출을 영영 붙잡지 않게. */
+export const FILE_TIMEOUT_MS = 10 * 60_000;
+/** 끊긴 나열을 이어받는 기록의 수명 — 그보다 오래된 기록은 NAS 가 바뀌었을 수 있어 처음부터 다시 나열한다. */
+const PLAN_CACHE_TTL_MS = 24 * 60 * 60_000;
+const WIN_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
 /** 서버가 준 이름 한 마디를 이 기계의 파일 이름으로. 경로 구분자·윈도우 금지 문자·제어문자는 _ 로, . 과 .. 은 거부(null). */
 export function safeSegment(name) {
   const s = String(name ?? "").normalize("NFC").replace(/[\u0000-\u001f<>:"/\\|?*]/g, "_").replace(/[. ]+$/, "");
   if (!s || s === "." || s === "..") return null;
-  return s;
+  // 윈도우 장치 이름(NUL.txt 등)은 파일 대신 장치로 열려 조용히 사라진다
+  return WIN_RESERVED.test(s) ? `_${s}` : s;
 }
+
+const insideOrSame = (p, root) => p === root || p.startsWith(root + sep);
 
 /** 사람이 읽는 NAS 경로를 마디로. 빈 마디는 버린다. */
 const segmentsOf = (displayPath) => String(displayPath ?? "").split("/").filter(Boolean);
@@ -51,18 +61,22 @@ export function resolveDest(dest, home) {
 /**
  * targets 를 펼쳐 받을 파일 목록을 만든다. 폴더는 그 폴더 이름부터 아래 구조를 그대로 둔다.
  *  listDir(p) → { items: [{ path, type, size, p }] } (게이트웨이 nas_list 응답). 폴더 하나를 못 읽어도 나머지는 계속한다.
+ *  deadline(now() 기준)을 넘기면 나열을 멈추고 state 를 돌려준다 — 같은 targets 로 state 를 넘기면 그 자리부터 이어서 나열한다.
  */
-export async function planFiles(targets, listDir, { maxFiles = MAX_FILES, maxDirs = MAX_DIRS } = {}) {
-  const files = [], failed = [];
-  let truncated = null, dirs = 0;
-  for (const t of targets) {
+export async function planFiles(targets, listDir, { maxFiles = MAX_FILES, maxDirs = MAX_DIRS, now = Date.now, deadline = Infinity, state = null } = {}) {
+  const files = state?.files ?? [], failed = state?.failed ?? [];
+  let truncated = null, dirs = state?.dirs ?? 0;
+  for (let ti = state?.ti ?? 0; ti < targets.length; ti++) {
+    const t = targets[ti];
     const rootSegs = segmentsOf(t.path);
     const keep = rootSegs.length ? rootSegs.length - 1 : 0; // 대상 자신의 이름부터 남긴다
     const rel = (path) => segmentsOf(path).slice(keep);
     if (t.type === "file") { files.push({ p: t.p, path: t.path, size: t.size ?? null, rel: rel(t.path) }); continue; }
-    const queue = [{ p: t.p, path: t.path }];
+    const queue = state && state.ti === ti && Array.isArray(state.queue) ? state.queue : [{ p: t.p, path: t.path }];
+    state = null;
     while (queue.length) {
       if (dirs >= maxDirs) { truncated = `폴더 ${maxDirs}개 상한`; break; }
+      if (now() > deadline) return { files, failed, truncated: "시간 한도(폴더 나열 중)", dirs, state: { ti, queue, files, failed, dirs } };
       const d = queue.shift();
       dirs++;
       let listing;
@@ -79,7 +93,7 @@ export async function planFiles(targets, listDir, { maxFiles = MAX_FILES, maxDir
     }
     if (truncated) break;
   }
-  return { files, failed, truncated, dirs };
+  return { files, failed, truncated, dirs, state: null };
 }
 
 /**
@@ -96,11 +110,20 @@ export async function pullFiles(files, destRoot, download, { budgetMs = DEFAULT_
     if (!segs.length || segs.some((s) => s === null)) { out.failed.push({ path: f.path, error: "이 기계에 쓸 수 없는 이름" }); continue; }
     const target = join(destRoot, ...segs);
     try {
+      // 받는 폴더 안에 이미 있는 링크를 따라 홈 밖에 쓰지 않는다 — 폴더는 실제 경로로, 파일 자리는 링크 여부로 본다
+      if (lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink()) { out.failed.push({ path: f.path, error: "그 자리에 링크가 있어 받지 않음" }); continue; }
+      const parent = dirname(target);
+      if (existsSync(parent) && !insideOrSame(realpathSync(parent), destRoot)) { out.failed.push({ path: f.path, error: "받는 폴더 밖으로 이어지는 링크" }); continue; }
       const st = statSync(target, { throwIfNoEntry: false });
       if (st?.isFile() && f.size !== null && st.size === f.size) { out.skipped++; continue; }
       const res = await download(f.p);
-      if (!res.ok) { out.failed.push({ path: f.path, error: `게이트웨이 ${res.status}` }); continue; }
-      mkdirSync(dirname(target), { recursive: true });
+      if (!res.ok || !res.body) {
+        await res.body?.cancel().catch(() => {}); // 본문을 버려야 커넥션이 풀로 돌아간다
+        out.failed.push({ path: f.path, error: `게이트웨이 ${res.status}` });
+        continue;
+      }
+      mkdirSync(parent, { recursive: true });
+      if (!insideOrSame(realpathSync(parent), destRoot)) { await res.body.cancel().catch(() => {}); out.failed.push({ path: f.path, error: "받는 폴더 밖으로 이어지는 링크" }); continue; }
       const part = `${target}.part`;
       try {
         await pipeline(Readable.fromWeb(res.body), createWriteStream(part));
@@ -124,37 +147,72 @@ export async function pullFiles(files, destRoot, download, { budgetMs = DEFAULT_
  *  args: { targets?: [{p, type?, path?, size?}], path?: string, dest?: string }
  */
 export async function nasPull(ctx, args, { home, fetchImpl, budgetMs = DEFAULT_BUDGET_MS, now = Date.now } = {}) {
+  const started = now();
+  const deadline = started + budgetMs;
   const destRoot = resolveDest(args.dest, home);
   const listDir = (p) => ctx.api(`/api/ui/me/nas/list?p=${encodeURIComponent(p)}`, { timeoutMs: 60_000 });
   let targets = Array.isArray(args.targets) ? args.targets.filter((t) => t && typeof t.p === "string" && t.p) : [];
   if (!targets.length && args.path) targets = [{ p: pOfPath(args.path), path: String(args.path) }];
   if (!targets.length) throw new Error("받을 대상이 없습니다 — nas_find·nas_list 결과의 p 를 targets 로, 또는 path 를 주세요");
-  // type 을 모르면 폴더로 열어 보고, 열리지 않으면 파일로 본다(nas_list 는 파일 경로에 404 를 준다)
+  // type·path 를 모르면 폴더로 열어 보고(응답의 path 가 이름이 된다), 없는 폴더(404)면 파일로 본다.
+  //  404 밖의 실패(로그인 만료 401 등)는 그대로 던진다 — 파일로 오인하면 처방이 사라진다.
   const typed = [];
   for (const t of targets) {
-    if (t.type === "file" || t.type === "dir") { typed.push({ ...t, path: t.path ?? null }); continue; }
+    if ((t.type === "file" || t.type === "dir") && t.path) { typed.push(t); continue; }
     try { const l = await listDir(t.p); typed.push({ ...t, type: "dir", path: t.path ?? l.path }); }
-    catch { typed.push({ ...t, type: "file" }); }
+    catch (e) {
+      if (!/게이트웨이 404\b/.test(String(e?.message ?? e))) throw e;
+      typed.push({ ...t, type: "file", path: t.path ?? null });
+    }
   }
-  // 경로를 모르는 대상은 이름을 정할 수 없어 받지 않는다(nas_find·nas_list 의 항목을 그대로 넘기면 path 가 있다)
   const named = typed.filter((t) => t.path);
   const unnamed = typed.length - named.length;
-  const plan = await planFiles(named, listDir);
-  const download = (p) => fetchImpl(`${ctx.gateway}/api/ui/me/nas/file?p=${encodeURIComponent(p)}`, { headers: { authorization: `Bearer ${ctx.token}` } });
-  const r = await pullFiles(plan.files, destRoot, download, { budgetMs, now });
+
+  mkdirSync(destRoot, { recursive: true });
+  const key = createHash("sha256").update(JSON.stringify(named.map((t) => [t.p, t.type]))).digest("hex").slice(0, 16);
+  const cacheFile = join(destRoot, `.nas-pull-${key}.json`);
+  let cached = null;
+  try {
+    const c = JSON.parse(readFileSync(cacheFile, "utf8"));
+    if (typeof c?.at === "number" && started - c.at < PLAN_CACHE_TTL_MS) cached = c;
+  } catch { /* 없음·깨짐 → 처음부터 */ }
+  const plan = cached?.plan ?? await planFiles(named, listDir, { now, deadline, state: cached?.state ?? null });
+  const saveCache = (body) => { try { writeFileSync(cacheFile, JSON.stringify({ at: cached?.at ?? started, ...body })); } catch { /* 기록 실패는 다음 호출이 처음부터 나열할 뿐 */ } };
+
+  const failedOf = (more) => [...plan.failed, ...more, ...(unnamed ? [{ path: null, error: `경로(path)를 모르는 대상 ${unnamed}개는 건너뜀` }] : [])];
+  if (plan.state) {
+    saveCache({ state: plan.state });
+    return {
+      dest: destRoot, done: false, planned: plan.files.length, downloaded: 0, skipped: 0, remaining: null, bytes: 0,
+      truncated: plan.truncated, listed_dirs: plan.dirs, failed: failedOf([]).slice(0, 50), files: [],
+      note: `폴더 목록을 만드는 중입니다(지금까지 폴더 ${plan.dirs}개). 같은 호출을 다시 하면 이어서 나열한 뒤 받습니다.`,
+    };
+  }
+  saveCache({ plan: { files: plan.files, failed: plan.failed, truncated: plan.truncated, dirs: plan.dirs, state: null } });
+
+  const download = (p) => fetchImpl(`${ctx.gateway}/api/ui/me/nas/file?p=${encodeURIComponent(p)}`, {
+    headers: { authorization: `Bearer ${ctx.token}` },
+    signal: AbortSignal.timeout(FILE_TIMEOUT_MS),
+  });
+  const r = await pullFiles(plan.files, destRoot, download, { budgetMs: Math.max(0, deadline - now()), now });
+  const done = r.remaining === 0 && !plan.truncated;
+  if (r.remaining === 0) { try { unlinkSync(cacheFile); } catch { /* 이미 없음 */ } }
+  const failed = failedOf(r.failed);
   return {
     dest: destRoot,
-    done: r.remaining === 0 && !plan.truncated,
+    done,
     planned: plan.files.length,
     downloaded: r.downloaded.length,
     skipped: r.skipped,
     remaining: r.remaining,
     bytes: r.bytes,
     truncated: plan.truncated,
-    failed: [...plan.failed, ...r.failed, ...(unnamed ? [{ path: null, error: `경로(path)를 모르는 대상 ${unnamed}개는 건너뜀` }] : [])].slice(0, 50),
+    failed: failed.slice(0, 50),
     files: r.downloaded.slice(0, 100),
     note: r.remaining
       ? `시간 한도로 ${r.remaining}개가 남았습니다. 같은 호출을 다시 하면 받은 파일은 건너뛰고 이어서 받습니다.`
-      : "받은 파일은 dest 아래에 NAS 폴더 구조 그대로 있습니다. 내용은 그 파일을 직접 열어 보세요.",
+      : plan.truncated
+        ? `${plan.truncated}에 걸려 일부만 받았습니다. 같은 호출을 반복하지 말고 하위 폴더로 나눠 받으세요.`
+        : `받은 파일은 dest 아래에 NAS 폴더 구조 그대로 있습니다${failed.length ? `(실패 ${failed.length}건은 failed 참고)` : ""}. 내용은 그 파일을 직접 열어 보세요.`,
   };
 }

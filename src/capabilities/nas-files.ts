@@ -1,6 +1,6 @@
 // NAS 파일명 검색 — 구성원 본인 FTP 계정으로 «어디에 무슨 파일이 있나»를 찾는다.
-//  이 도구들은 본문을 돌려주지 않는다. 본문은 결과의 p 를 로컬 도구 lively_local_nas_pull 에 넘겨 세션 작업 폴더로 받은 뒤
-//  AI 가 연다(nas-download-route.ts — 쿠키·Bearer 둘 다). download_url 은 사람이 브라우저로 받는 링크다.
+//  이 도구들은 본문을 돌려주지 않는다. 본문은 결과의 p 를 로컬 도구 lively_local_nas_pull 에 넘겨 그 기계의 홈 아래
+//  (기본 ~/NAS사본)로 받은 뒤 AI 가 연다(nas-download-route.ts — 쿠키·Bearer 둘 다). download_url 은 사람이 브라우저로 받는 링크다.
 //  경계·자격 설계는 net/nas/nas-access.ts · net/nas/nas-index.ts 머리주석.
 import { z } from "zod";
 import type { Capability } from "./types.js";
@@ -15,7 +15,7 @@ import { NasConfigError, openNasSession, resolveNasLogin, resolveNasServer, nasI
 /** 첫 색인을 기다리는 최대 시간. 넘으면 «만드는 중»으로 답하고 색인은 뒤에서 계속 만든다(MCP 호출을 오래 붙잡지 않게). */
 export const FIRST_INDEX_WAIT_MS = 20_000;
 
-const BODY_NOTE = "파일 내용이 필요하면 항목의 p(파일·폴더)를 lively_local_nas_pull 에 넘겨 작업 폴더로 받은 뒤 연다. download_url 은 사람이 브라우저로 받는 링크다.";
+const BODY_NOTE = "파일 내용이 필요하면 항목(p·path·type·size)을 lively_local_nas_pull 의 targets 로 넘겨 ~/NAS사본 아래로 받은 뒤 연다. 프로젝트 공유 폴더에는 받지 않는다(다른 구성원도 본다). download_url 은 사람이 브라우저로 받는 링크다.";
 
 // 소켓 오류 원문(사설 IP·포트)은 AI 세션으로 보내지 않고 로그에만 남긴다.
 function rethrow(e: unknown, memberId?: string): never {

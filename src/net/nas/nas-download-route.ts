@@ -33,6 +33,11 @@ export function registerNasDownloadRoute(app: express.Express, verifier: BearerV
         res.status(401).json({ error: "라이블리 인증이 필요합니다" });
         return;
       }
+      // nas_find·nas_list 와 같은 권한(context) — 목록은 못 보는 토큰이 본문은 받는 일이 없게
+      if (!Array.isArray(user.scopes) || !user.scopes.includes("context")) {
+        res.status(403).json({ error: "이 토큰으로는 NAS 파일을 받을 수 없습니다(context 권한 필요)" });
+        return;
+      }
       const raw = decodeRawPath(String(req.query.p ?? ""));
       if (!raw || !isSafeRawPath(raw)) { res.status(400).json({ error: "파일 경로가 올바르지 않습니다" }); return; }
       const shown = displayPath(raw);
