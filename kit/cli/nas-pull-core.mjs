@@ -41,7 +41,7 @@ function realOfNearest(p) {
 }
 
 /**
- * 죽은 호출이 남긴 그 파일의 임시 조각(<이름>.<pid>.part)을 치운다. 이름에 pid 가 있어 다음 호출이 같은 이름을 덮지 않으므로
+ * 죽은 호출이 남긴 그 파일의 임시 조각(.<이름>.nas-pull-<pid>.part)을 치운다. NAS 에서 온 정상 파일과 겹치지 않게 이 꼴만 본다. 이름에 pid 가 있어 다음 호출이 같은 이름을 덮지 않으므로
  *  스스로 치워야 한다. 살아 있는 전송은 계속 쓰여 수정 시각이 새로우니 FILE_TIMEOUT_MS 보다 오래된 것만 지운다.
  */
 function sweepStaleParts(target, now) {
@@ -49,7 +49,7 @@ function sweepStaleParts(target, now) {
   let names;
   try { names = readdirSync(dir); } catch { return; }
   for (const n of names) {
-    if (!n.startsWith(base + ".") || !/^\.\d+\.part$/.test(n.slice(base.length))) continue;
+    if (!n.startsWith(`.${base}.`) || !/^\.nas-pull-\d+\.part$/.test(n.slice(base.length + 1))) continue;
     try { const st = lstatSync(join(dir, n)); if (now() - st.mtimeMs > FILE_TIMEOUT_MS) unlinkSync(join(dir, n)); } catch { /* 경합 — 무시 */ }
   }
 }
@@ -149,7 +149,8 @@ export async function pullFiles(files, destRootIn, download, { budgetMs = DEFAUL
       }
       mkdirSync(parent, { recursive: true });
       if (!insideOrSame(realpathSync(parent), destRoot)) { await res.body.cancel().catch(() => {}); out.failed.push({ path: f.path, error: "받는 폴더 밖으로 이어지는 링크" }); continue; }
-      const part = `${target}.${process.pid}.part`; // pid: 같은 폴더로 동시에 받는 두 세션이 임시 파일을 섞지 않게
+      // pid: 같은 폴더로 동시에 받는 두 세션이 임시 파일을 섞지 않게. 점·nas-pull 표식: NAS 의 정상 파일 이름과 겹치지 않게(sweep 이 지운다)
+      const part = join(dirname(target), `.${basename(target)}.nas-pull-${process.pid}.part`);
       sweepStaleParts(target, now);
       try {
         await pipeline(Readable.fromWeb(res.body), exclusiveWriteStream(part));

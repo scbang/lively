@@ -311,7 +311,7 @@ test("pullFiles: 받는 자리 옆 임시 파일 이름에 밖을 가리키는 �
   const outside = mkTmp("naspull-out-");
   const victim = path.join(outside, "victim");
   fs.writeFileSync(victim, "ORIGINAL");
-  for (const n of ["x.txt.part", `x.txt.${process.pid}.part`]) fs.symlinkSync(victim, path.join(root, n));
+  for (const n of ["x.txt.part", `x.txt.${process.pid}.part`, `.x.txt.nas-pull-${process.pid}.part`]) fs.symlinkSync(victim, path.join(root, n));
   const r = await pullFiles([{ p: "x", path: "/x.txt", size: 5, rel: ["x.txt"] }], root, mkDownload({ x: "PWNED" }), { now: () => 0 });
   assert.equal(read(victim), "ORIGINAL");
   assert.equal(fs.lstatSync(path.join(root, "x.txt")).isSymbolicLink(), false);
@@ -329,14 +329,17 @@ test("pullFiles: 중간 폴더가 밖을 가리키는 링크면 밖에 폴더도
 
 test("pullFiles: 죽은 호출이 남긴 오래된 임시 조각은 치우고, 최근 것은 둔다", async () => {
   const root = fs.realpathSync(mkTmp());
-  const old = path.join(root, "x.txt.11111.part"), fresh = path.join(root, "x.txt.22222.part");
-  fs.writeFileSync(old, "o"); fs.writeFileSync(fresh, "f");
+  const old = path.join(root, ".x.txt.nas-pull-11111.part"), fresh = path.join(root, ".x.txt.nas-pull-22222.part");
+  // NAS 에서 온 정상 파일이 우연히 «이름.숫자.part» 꼴이어도 지우지 않는다(경량 재검 2026-11-04)
+  const lookalike = path.join(root, "x.txt.1.part");
+  fs.writeFileSync(old, "o"); fs.writeFileSync(fresh, "f"); fs.writeFileSync(lookalike, "keep");
   const longAgo = new Date(Date.now() - 3 * 60 * 60_000);
-  fs.utimesSync(old, longAgo, longAgo);
+  fs.utimesSync(old, longAgo, longAgo); fs.utimesSync(lookalike, longAgo, longAgo);
   await pullFiles([{ p: "x", path: "/x.txt", size: 1, rel: ["x.txt"] }], root, mkDownload({ x: "a" }), { now: Date.now });
   assert.equal(exists(old), false);
   assert.equal(exists(fresh), true);
   assert.equal(read(path.join(root, "x.txt")), "a");
+  assert.equal(read(lookalike), "keep");
 });
 
 test("pullFiles: 시작부터 budgetMs 를 넘긴 뒤엔 새 파일을 시작하지 않고 remaining 에 남은 수", async () => {
