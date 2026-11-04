@@ -2,8 +2,8 @@
 //
 //  왜 구성원마다 따로 색인하나: NAS 는 FTP 계정마다 열린 폴더가 다르다(예: vsftpd 가상 사용자마다 팀 폴더를 bind mount).
 //   한 사람 색인을 다른 사람 검색에 쓰면 그 사람이 못 여는 폴더의 파일 이름이 새어 나간다. 그래서 캐시 키가 구성원이다.
-//  왜 본문은 안 읽나: NAS 서류(계약서·신분증 스캔 등)에는 개인정보가 많다. 이 색인은 파일 이름만 다루고,
-//   본문은 사람이 브라우저로 내려받는다(nas-download-route.ts). AI 에 본문을 주는 경로를 만들지 않는 것이 이 기능의 경계다.
+//  본문: 이 색인은 파일 이름만 다룬다. 본문은 내려받기 경로(nas-download-route.ts)로만 오가고,
+//   거기서도 볼 수 있는 범위는 그 구성원 본인 FTP 계정 권한이다.
 import { parseListing, displayPath, type FtpListEntry } from "../ftp/ftp-list.js";
 
 export interface NasEntry {

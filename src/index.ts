@@ -333,8 +333,8 @@ registerProjectV6Routes(app, verifier, {
 });
 // 세션이력 회수·수집(#905 C1) — 트랜스크립트 델타 offset-CAS append + watermark. 캡처 훅(kit)이 POST 한다.
 registerSessionLogRoutes(app, verifier);
-// NAS 파일 내려받기 — 브라우저 세션 쿠키만 받는다(nas_find 링크의 본문은 사람만 연다).
-registerNasDownloadRoute(app);
+// NAS 파일 내려받기 — 브라우저 세션 쿠키와 구성원 AI 세션 토큰(lively_local_nas_pull) 둘 다 받는다.
+registerNasDownloadRoute(app, verifier);
 // 감사로그 CSV 내보내기(#1309) — 관리탭 [감사 로그] 3탭의 "CSV 다운로드". capability(res.json 일괄)로는 담을 수
 //  없는 무제한 행수를 keyset 커서로 스트리밍한다(상세·불변식은 ee/audit/export-routes.ts 머리주석).
 //  ★ #1601 로 Enterprise 로 갔다 — 화면 집계(3탭)는 코어에 그대로 있고, 증빙 반출만 EE 다.
