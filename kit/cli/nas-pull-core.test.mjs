@@ -305,6 +305,28 @@ test("pullFiles: 받는 폴더 안의 하위 폴더가 홈 밖을 가리키는 �
   assert.equal(r.failed.length, 1);
 });
 
+test("pullFiles: 받는 자리 옆 임시 파일 이름에 밖을 가리키는 링크가 있어도 밖의 파일을 건드리지 않는다", async () => {
+  // 회귀: 임시 파일(.part)을 링크를 따라 열어 홈 밖 파일을 덮어썼다(재리뷰 2026-11-04). 임시 이름 규칙에 기대지 않게 흔한 후보를 다 깐다.
+  const root = fs.realpathSync(mkTmp());
+  const outside = mkTmp("naspull-out-");
+  const victim = path.join(outside, "victim");
+  fs.writeFileSync(victim, "ORIGINAL");
+  for (const n of ["x.txt.part", `x.txt.${process.pid}.part`]) fs.symlinkSync(victim, path.join(root, n));
+  const r = await pullFiles([{ p: "x", path: "/x.txt", size: 5, rel: ["x.txt"] }], root, mkDownload({ x: "PWNED" }), { now: () => 0 });
+  assert.equal(read(victim), "ORIGINAL");
+  assert.equal(fs.lstatSync(path.join(root, "x.txt")).isSymbolicLink(), false);
+  assert.equal(r.failed.length + r.downloaded.length, 1);
+});
+
+test("pullFiles: 중간 폴더가 밖을 가리키는 링크면 밖에 폴더도 만들지 않는다", async () => {
+  const root = fs.realpathSync(mkTmp());
+  const outside = mkTmp("naspull-out-");
+  fs.symlinkSync(outside, path.join(root, "B"), "junction");
+  const r = await pullFiles([{ p: "x", path: "/B/sub/deep/x.txt", size: 1, rel: ["B", "sub", "deep", "x.txt"] }], root, mkDownload({ x: "a" }), { now: () => 0 });
+  assert.deepEqual(fs.readdirSync(outside), []);
+  assert.equal(r.failed.length, 1);
+});
+
 test("pullFiles: 시작부터 budgetMs 를 넘긴 뒤엔 새 파일을 시작하지 않고 remaining 에 남은 수", async () => {
   const root = mkTmp();
   let t = 1000;

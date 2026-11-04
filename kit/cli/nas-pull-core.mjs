@@ -7,7 +7,7 @@
 //  · MCP 호출은 하네스를 붙잡는 동기 호출이라(lively-mcp-local.mjs 머리말) 한 번에 budgetMs 만 쓰고 멈춘다. 폴더 나열도 이 예산 안이다
 //    — 폴더 하나마다 게이트웨이가 FTP 로그인부터 다시 하므로 큰 폴더는 나열만 수 분이 걸린다. 끊긴 나열은 dest 의 .nas-pull-<키>.json 에
 //    남겨 다음 호출이 이어서 나열하고, 받기는 같은 크기 파일을 건너뛰는 것으로 이어받는다. 다 받으면 그 파일을 지운다.
-import { mkdirSync, statSync, lstatSync, renameSync, unlinkSync, createWriteStream, realpathSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, statSync, lstatSync, renameSync, unlinkSync, createWriteStream, realpathSync, existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve, dirname, basename, isAbsolute, sep } from "node:path";
 import { Readable } from "node:stream";
@@ -33,6 +33,19 @@ export function safeSegment(name) {
 
 const insideOrSame = (p, root) => p === root || p.startsWith(root + sep);
 
+/** 아직 없을 수 있는 경로의 실제 경로 — 가장 가까운 존재 조상을 realpath 로 풀고 나머지를 붙인다(링크로 밖을 가리키는 조상을 잡는다). */
+function realOfNearest(p) {
+  let probe = p, tail = "";
+  while (!existsSync(probe)) { const up = dirname(probe); if (up === probe) break; tail = tail ? join(basename(probe), tail) : basename(probe); probe = up; }
+  return tail ? join(realpathSync(probe), tail) : realpathSync(probe);
+}
+
+/** 링크를 따라가지 않고 새로 만드는 쓰기 — 그 이름의 링크·잔해를 먼저 지우고 O_EXCL 로 연다(링크를 따라 밖의 파일을 덮지 않게). */
+function exclusiveWriteStream(file) {
+  try { unlinkSync(file); } catch { /* 없음 */ }
+  return createWriteStream(file, { flags: "wx" });
+}
+
 /** 사람이 읽는 NAS 경로를 마디로. 빈 마디는 버린다. */
 const segmentsOf = (displayPath) => String(displayPath ?? "").split("/").filter(Boolean);
 
@@ -47,10 +60,7 @@ export function resolveDest(dest, home) {
   const homeReal = realpathSync(home);
   const base = join(homeReal, DEFAULT_DEST_DIR);
   const raw = dest ? (isAbsolute(dest) ? resolve(dest) : resolve(base, dest)) : base;
-  // 아직 없는 경로는 가장 가까운 존재 조상을 realpath 로 풀어 비교한다(심볼릭 링크로 홈 밖을 가리키는 경우를 잡는다)
-  let probe = raw, tail = "";
-  while (!existsSync(probe)) { const up = dirname(probe); if (up === probe) break; tail = tail ? join(basename(probe), tail) : basename(probe); probe = up; }
-  const real = tail ? join(realpathSync(probe), tail) : realpathSync(probe);
+  const real = realOfNearest(raw);
   if (real !== homeReal && !real.startsWith(homeReal + sep)) {
     throw new Error(`받을 폴더는 홈(${homeReal}) 아래만 됩니다: ${raw}`);
   }
@@ -100,8 +110,9 @@ export async function planFiles(targets, listDir, { maxFiles = MAX_FILES, maxDir
  * 계획대로 받는다. download(p) → Response(본문 스트림). 같은 크기 파일이 있으면 건너뛰고, 받는 중엔 .part 에 쓰고 끝나면 옮긴다.
  *  now 는 시계(테스트 주입용). budgetMs 를 넘기면 남은 파일을 remaining 으로 돌려준다.
  */
-export async function pullFiles(files, destRoot, download, { budgetMs = DEFAULT_BUDGET_MS, now = Date.now } = {}) {
+export async function pullFiles(files, destRootIn, download, { budgetMs = DEFAULT_BUDGET_MS, now = Date.now } = {}) {
   const started = now();
+  const destRoot = realOfNearest(destRootIn); // 아래 «밖인가» 비교는 실제 경로끼리라야 맞다
   const out = { downloaded: [], skipped: 0, failed: [], remaining: 0, bytes: 0 };
   for (let i = 0; i < files.length; i++) {
     if (now() - started > budgetMs) { out.remaining = files.length - i; break; }
@@ -113,7 +124,7 @@ export async function pullFiles(files, destRoot, download, { budgetMs = DEFAULT_
       // 받는 폴더 안에 이미 있는 링크를 따라 홈 밖에 쓰지 않는다 — 폴더는 실제 경로로, 파일 자리는 링크 여부로 본다
       if (lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink()) { out.failed.push({ path: f.path, error: "그 자리에 링크가 있어 받지 않음" }); continue; }
       const parent = dirname(target);
-      if (existsSync(parent) && !insideOrSame(realpathSync(parent), destRoot)) { out.failed.push({ path: f.path, error: "받는 폴더 밖으로 이어지는 링크" }); continue; }
+      if (!insideOrSame(realOfNearest(parent), destRoot)) { out.failed.push({ path: f.path, error: "받는 폴더 밖으로 이어지는 링크" }); continue; }
       const st = statSync(target, { throwIfNoEntry: false });
       if (st?.isFile() && f.size !== null && st.size === f.size) { out.skipped++; continue; }
       const res = await download(f.p);
@@ -124,9 +135,9 @@ export async function pullFiles(files, destRoot, download, { budgetMs = DEFAULT_
       }
       mkdirSync(parent, { recursive: true });
       if (!insideOrSame(realpathSync(parent), destRoot)) { await res.body.cancel().catch(() => {}); out.failed.push({ path: f.path, error: "받는 폴더 밖으로 이어지는 링크" }); continue; }
-      const part = `${target}.part`;
+      const part = `${target}.${process.pid}.part`; // pid: 같은 폴더로 동시에 받는 두 세션이 임시 파일을 섞지 않게
       try {
-        await pipeline(Readable.fromWeb(res.body), createWriteStream(part));
+        await pipeline(Readable.fromWeb(res.body), exclusiveWriteStream(part));
         renameSync(part, target);
       } catch (e) {
         try { unlinkSync(part); } catch { /* 이미 없음 */ }
@@ -173,22 +184,32 @@ export async function nasPull(ctx, args, { home, fetchImpl, budgetMs = DEFAULT_B
   const cacheFile = join(destRoot, `.nas-pull-${key}.json`);
   let cached = null;
   try {
-    const c = JSON.parse(readFileSync(cacheFile, "utf8"));
-    if (typeof c?.at === "number" && started - c.at < PLAN_CACHE_TTL_MS) cached = c;
+    if (!lstatSync(cacheFile, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      const c = JSON.parse(readFileSync(cacheFile, "utf8"));
+      if (typeof c?.at === "number" && started - c.at < PLAN_CACHE_TTL_MS) cached = c;
+      else unlinkSync(cacheFile); // 오래된 기록은 지운다 — 남겨 두면 dest 에 영구히 쌓인다
+    }
   } catch { /* 없음·깨짐 → 처음부터 */ }
   const plan = cached?.plan ?? await planFiles(named, listDir, { now, deadline, state: cached?.state ?? null });
-  const saveCache = (body) => { try { writeFileSync(cacheFile, JSON.stringify({ at: cached?.at ?? started, ...body })); } catch { /* 기록 실패는 다음 호출이 처음부터 나열할 뿐 */ } };
+  // 임시 파일에 쓰고 옮긴다 — 동시 호출이 반쪽 JSON 을 읽지 않고, 기록 자리의 링크도 따라가지 않는다
+  const saveCache = (body) => {
+    const tmp = `${cacheFile}.${process.pid}.tmp`;
+    try {
+      const ws = exclusiveWriteStream(tmp); ws.end(JSON.stringify({ at: cached?.at ?? started, ...body }));
+      return new Promise((ok) => { ws.on("close", () => { try { renameSync(tmp, cacheFile); } catch { /* 다음 호출이 처음부터 */ } ok(); }); ws.on("error", () => ok()); });
+    } catch { return Promise.resolve(); /* 기록 실패는 다음 호출이 처음부터 나열할 뿐 */ }
+  };
 
   const failedOf = (more) => [...plan.failed, ...more, ...(unnamed ? [{ path: null, error: `경로(path)를 모르는 대상 ${unnamed}개는 건너뜀` }] : [])];
   if (plan.state) {
-    saveCache({ state: plan.state });
+    await saveCache({ state: plan.state });
     return {
       dest: destRoot, done: false, planned: plan.files.length, downloaded: 0, skipped: 0, remaining: null, bytes: 0,
       truncated: plan.truncated, listed_dirs: plan.dirs, failed: failedOf([]).slice(0, 50), files: [],
       note: `폴더 목록을 만드는 중입니다(지금까지 폴더 ${plan.dirs}개). 같은 호출을 다시 하면 이어서 나열한 뒤 받습니다.`,
     };
   }
-  saveCache({ plan: { files: plan.files, failed: plan.failed, truncated: plan.truncated, dirs: plan.dirs, state: null } });
+  await saveCache({ plan: { files: plan.files, failed: plan.failed, truncated: plan.truncated, dirs: plan.dirs, state: null } });
 
   const download = (p) => fetchImpl(`${ctx.gateway}/api/ui/me/nas/file?p=${encodeURIComponent(p)}`, {
     headers: { authorization: `Bearer ${ctx.token}` },
