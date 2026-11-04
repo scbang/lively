@@ -303,6 +303,8 @@ await t("NasIndexCache.markStale: 색인이 있는 키는 isFresh=false 가 되�
   c.markStale("k");
   assert.equal(c.isFresh("k"), false);
   assert.equal(c.get("k").result, r);
+  c.markStale("none"); // 없는 키도 오류가 아니다
+  assert.equal(c.isFresh("none"), false);
 });
 
 await t("NasIndexCache.markStale: build 진행 중에 부르면 그 build 가 끝나 result 가 채워져도 isFresh=false", async () => {
@@ -327,10 +329,16 @@ await t("NasIndexCache.markStale: 뒤에 다시 build 하면 fresh 로 돌아온
   assert.equal(c.get("k").result, r);
 });
 
-await t("NasIndexCache.markStale: 없는 키에 불러도 오류가 아니다", () => {
+await t("NasIndexCache.markStale: 진행 중 build 가 실패해도 그 표시가 다음 성공 build 를 낡게 만들지 않는다", async () => {
+  // 회귀: 표시를 성공 때만 내려서 실패 뒤 다음 성공 색인이 곧바로 낡은 것이 됐다(리뷰 2026-11-04)
   const c = new NasIndexCache(() => 0);
-  c.markStale("none");
-  assert.equal(c.isFresh("none"), false);
+  const d = deferred<CrawlResult>();
+  const p = c.build("k", () => d.promise);
+  c.markStale("k");
+  d.reject(new Error("x"));
+  await p.catch(() => {});
+  await c.build("k", async () => result("ok"));
+  assert.equal(c.isFresh("k"), true);
 });
 
 console.log(`\n${pass} passed, ${failed.length} failed`);

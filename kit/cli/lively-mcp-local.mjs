@@ -307,7 +307,7 @@ registerTool({
   description: "NAS(본인 FTP 계정 권한)에서 파일이나 폴더를 통째로 이 기계의 폴더로 내려받는다. 받은 뒤 그 파일을 직접 열어 내용을 본다. "
     + "대상은 nas_find·nas_list 결과 항목(p·type·path·size)을 targets 로 그대로 넘긴다(여러 개 가능). 폴더는 그 폴더 이름부터 하위 구조를 유지한다. "
     + "dest 는 홈 아래만 되고 상대 경로는 ~/NAS사본 기준이다(예: dest «프로젝트A» → ~/NAS사본/프로젝트A). 같은 크기로 이미 받은 파일은 건너뛴다. "
-    + "한 번에 약 50초만 받고 멈추므로 응답의 done 이 false 면 같은 호출을 다시 한다.",
+    + "한 번에 약 50초만 받고 멈춘다 — remaining 이 남았거나 폴더 목록을 만드는 중이면(note) 같은 호출을 다시 하고, truncated 가 상한이면 같은 호출을 반복하지 말고 하위 폴더로 나눠 부른다.",
   inputSchema: {
     type: "object",
     properties: {
@@ -345,7 +345,8 @@ registerTool({
   description: "로컬 파일이나 폴더를 NAS(본인 FTP 계정 권한)의 폴더로 올린다. 폴더는 그 이름부터 하위 구조를 유지하고 필요한 NAS 폴더를 만든다. "
     + "dest_p 는 nas_find·nas_list 결과의 폴더 p(또는 dest_path 에 사람이 읽는 경로). 같은 이름 파일이 NAS 에 있으면 덮지 않는다 — "
     + "크기가 같으면 이미 올린 것으로 세고, 다르면 conflicts 로 알린다(덮으려면 사람 확인 뒤 overwrite:true). 로컬 링크는 따라가지 않는다. "
-    + "한 번에 약 50초만 올리고 멈추므로 응답의 done 이 false 면 같은 호출을 다시 한다. 폴더 만들기·지우기·이름 바꾸기는 nas_manage.",
+    + "한 번에 약 50초만 올리고 멈춘다 — remaining·pending_dirs 가 남았으면 같은 호출을 다시 하고, truncated 면 같은 호출을 반복하지 말고 하위 폴더로 나눠 부른다. "
+    + "폴더 만들기·지우기·이름 바꾸기는 nas_manage.",
   inputSchema: {
     type: "object",
     properties: {

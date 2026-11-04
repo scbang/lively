@@ -217,7 +217,7 @@ export class FtpSession {
 
   /** 파일 크기(바이트). 없거나 폴더면 null(서버 550). */
   async size(rawPath: string): Promise<number | null> {
-    if (!isSafeRawPath(rawPath)) throw new FtpError("쓸 수 없는 경로입니다");
+    if (!isSafeRawPath(rawPath)) throw new FtpError("다룰 수 없는 경로입니다");
     const r = await this.cmd(`SIZE ${rawPath}`);
     if (r.code === 213) { const n = Number(r.text.trim()); return Number.isFinite(n) ? n : null; }
     if (r.code === 550) return null;

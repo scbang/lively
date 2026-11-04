@@ -94,12 +94,30 @@ export async function nasPush(ctx, args, { fetchImpl, budgetMs = DEFAULT_BUDGET_
     signal: AbortSignal.timeout(FILE_TIMEOUT_MS),
   });
 
+  // 원격 폴더의 파일 이름·크기 — 폴더마다 한 번 묻는다. 이어받는 호출이 이미 올린 파일의 본문을 다시 보내지 않게(409 는 본문을 다 보낸 뒤에 온다).
+  const listings = new Map();
+  const remoteSizes = async (relDir) => {
+    const key = relDir.join("/");
+    if (listings.has(key)) return listings.get(key);
+    let sizes = null;
+    try {
+      const l = await ctx.api(`/api/ui/me/nas/list?p=${encodeURIComponent(pOf(relDir))}`, { timeoutMs: 60_000 });
+      sizes = new Map((l?.items ?? []).filter((it) => it.type === "file").map((it) => [String(it.path).slice(String(it.path).lastIndexOf("/") + 1).normalize("NFC"), it.size]));
+      ensured.add(key);
+    } catch { /* 없는 폴더 — 올리기가 403 을 받으면 만든다 */ }
+    listings.set(key, sizes);
+    return sizes;
+  };
+
   for (let i = 0; i < plan.files.length; i++) {
     if (now() - started > budgetMs) { out.remaining = plan.files.length - i; break; }
     const f = plan.files[i];
     const relDir = f.rel.slice(0, -1);
     const shown = f.rel.join("/");
     try {
+      const have = (await remoteSizes(relDir))?.get(f.rel[f.rel.length - 1].normalize("NFC"));
+      if (have !== undefined && have === f.size) { out.skipped++; continue; }
+      if (have !== undefined && !args.overwrite) { out.conflicts.push({ path: shown, local_size: f.size, nas_size: have }); continue; }
       let res = await put(f, relDir);
       if (res.status === 403 && !ensured.has(relDir.join("/"))) {
         await res.body?.cancel().catch(() => {});
@@ -122,17 +140,17 @@ export async function nasPush(ctx, args, { fetchImpl, budgetMs = DEFAULT_BUDGET_
     }
   }
   // 파일이 없는 폴더(빈 폴더)는 남은 시간에 만든다 — 다 올린 호출에서만
+  let pendingDirs = 0;
   if (out.remaining === 0) {
     const withFiles = new Set(plan.files.map((f) => f.rel.slice(0, -1).join("/")));
-    for (const rel of plan.dirs) {
-      if (now() - started > budgetMs) { out.remaining = 1; break; } // 이어받을 일이 남았다는 표시(다음 호출이 마저 만든다)
-      const key = rel.join("/");
-      if (withFiles.has(key) || [...withFiles].some((w) => w.startsWith(key + "/"))) continue;
-      await ensureDir(rel);
+    const empty = plan.dirs.filter((rel) => { const key = rel.join("/"); return !withFiles.has(key) && ![...withFiles].some((w) => w.startsWith(key + "/")); });
+    for (let k = 0; k < empty.length; k++) {
+      if (now() - started > budgetMs) { pendingDirs = empty.length - k; break; } // 다음 호출이 마저 만든다
+      await ensureDir(empty[k]);
     }
   }
 
-  const done = out.remaining === 0 && !plan.truncated;
+  const done = out.remaining === 0 && pendingDirs === 0 && !plan.truncated;
   return {
     src,
     done,
@@ -141,13 +159,14 @@ export async function nasPush(ctx, args, { fetchImpl, budgetMs = DEFAULT_BUDGET_
     skipped: out.skipped,
     conflicts: out.conflicts.slice(0, 50),
     remaining: out.remaining,
+    pending_dirs: pendingDirs,
     bytes: out.bytes,
     skipped_links: plan.links,
     truncated: plan.truncated,
     failed: out.failed.slice(0, 50),
     files: out.uploaded.slice(0, 100),
-    note: out.remaining
-      ? `시간 한도로 ${out.remaining}개가 남았습니다. 같은 호출을 다시 하면 올린 것은 건너뛰고 이어서 올립니다.`
+    note: out.remaining || pendingDirs
+      ? `시간 한도로 파일 ${out.remaining}개·빈 폴더 ${pendingDirs}개가 남았습니다. 같은 호출을 다시 하면 올린 것은 건너뛰고 이어서 올립니다.`
       : out.conflicts.length
         ? `NAS 에 같은 이름·다른 크기 파일 ${out.conflicts.length}개가 있어 올리지 않았습니다. 덮으려면 사람에게 확인받고 overwrite:true 로 다시 부르세요.`
         : plan.truncated ? `${plan.truncated}에 걸려 일부만 올렸습니다. 하위 폴더로 나눠 올리세요.` : "다 올렸습니다.",

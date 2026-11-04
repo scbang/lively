@@ -4462,7 +4462,7 @@
   "rest": [
    "POST /api/ui/me/nas/manage"
   ],
-  "input_hash": "5d4e94902bd85261"
+  "input_hash": "b1771c7cc8c703f4"
  },
  {
   "name": "me_oauth_connect",

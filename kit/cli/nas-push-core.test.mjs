@@ -113,7 +113,11 @@ function mkRemote({ dirs = ["/", "/Up"] } = {}) {
       if (apiPath.startsWith("/api/ui/me/nas/list?")) {
         const p = new URLSearchParams(apiPath.slice(apiPath.indexOf("?") + 1)).get("p");
         if (remote.listFails || !remote.dirs.has(p)) throw new Error("게이트웨이 404 (/api/ui/me/nas/list)");
-        return { path: "", entries: [] };
+        // 실제 nas_list 처럼 바로 아래 파일의 사람이 읽는 경로·크기를 준다
+        const shown = (x) => Buffer.from(x, "base64url").toString("utf8");
+        const parentOf = (x) => { const d = shown(x); const i = d.lastIndexOf("/"); return i <= 0 ? "/" : d.slice(0, i); };
+        const items = [...remote.files].filter(([fp]) => parentOf(fp) === shown(p)).map(([fp, buf]) => ({ type: "file", path: shown(fp), size: buf.length, p: fp }));
+        return { path: shown(p), items };
       }
       throw new Error(`게이트웨이 404 (${apiPath})`);
     },
@@ -268,7 +272,7 @@ test("nasPush: overwrite 가 참일 때만 &overwrite=1", async () => {
   }
 });
 
-test("nasPush: 409 면 원격 size 가 로컬과 같으면 skipped, 다르면 conflicts 에 남기고 올리지 않는다", async () => {
+test("nasPush: NAS 에 같은 이름이 있으면 크기가 같으면 skipped, 다르면 conflicts 로 남기고 올리지 않는다 — 폴더 목록에서 보면 본문을 안 보내고, 목록에서 못 보면 409 로 가른다", async () => {
   const dir = mkTmp();
   const file = path.join(dir, "c.txt");
   fs.writeFileSync(file, "12345");
@@ -276,14 +280,16 @@ test("nasPush: 409 면 원격 size 가 로컬과 같으면 skipped, 다르면 co
     ["같은 크기", Buffer.from("abcde"), { skipped: 1, conflicts: 0 }],
     ["다른 크기", Buffer.from("abc"), { skipped: 0, conflicts: 1 }],
   ];
-  for (const [label, nasBytes, want] of rows) {
+  for (const seen of [true, false]) for (const [label0, nasBytes, want] of rows) {
+    const label = `${label0}·목록에서 ${seen ? "봄" : "못 봄"}`;
     const remote = mkRemote();
+    remote.listFails = !seen; // 못 본 경우: 목록 직후 다른 사람이 만든 파일 등
     remote.files.set(pChild(UP, "c.txt"), nasBytes);
     const r = await push(remote, { src: file, dest_path: "/Up" });
     assert.equal(r.uploaded, 0, label);
     assert.equal(r.skipped, want.skipped, label);
     assert.equal(r.conflicts.length, want.conflicts, label);
-    assert.equal(remote.puts.length, 1, `${label}: 다시 올리지 않는다`);
+    assert.equal(remote.puts.length, seen ? 0 : 1, `${label}: 본문은 많아야 한 번(409)`);
     assert.ok(remote.files.get(pChild(UP, "c.txt")).equals(nasBytes), `${label}: 원격 그대로`);
     if (want.conflicts) {
       const c = r.conflicts[0];
@@ -317,18 +323,17 @@ test("nasPush: 폴더 src 는 rel 의 폴더 마디를 이은 부모 p 로 올�
   for (const call of remote.puts.filter((c) => c.name === "c.txt")) assert.equal(call.dir, pJoin(UP, "A", "b"));
 });
 
-test("nasPush: mkdir 가 실패해도 list 가 성공하면 이미 있는 폴더로 보고 한 번 다시 올린다", async () => {
+test("nasPush: 목록이 열리는(이미 있는) 폴더에서 403 이면 권한 문제로 보고 폴더를 만들거나 다시 올리지 않는다", async () => {
+  // 올리기 전 폴더 목록을 읽어 있는 폴더를 안다 — 거기서 403 은 «폴더 없음»이 아니라 쓰기 권한 없음이다(리뷰 반영 2026-11-04)
   const base = mkTmp();
   mkTree(base, { "A/a.txt": "aa" });
   const remote = mkRemote({ dirs: ["/", "/Up", "/Up/A"] });
   remote.forbidOnce.add(pJoin(UP, "A"));
   const r = await push(remote, { src: path.join(base, "A"), dest_path: "/Up" });
-  assert.equal(r.uploaded, 1);
-  assert.deepEqual(r.failed, []);
-  assert.equal(remote.puts.length, 2);
-  const lists = remote.apiCalls.filter((c) => c.path.startsWith("/api/ui/me/nas/list?"))
-    .map((c) => new URLSearchParams(c.path.slice(c.path.indexOf("?") + 1)).get("p"));
-  assert.ok(lists.includes(pJoin(UP, "A")), lists.join(", "));
+  assert.equal(r.uploaded, 0);
+  assert.ok(r.failed.some((x) => String(x.path).endsWith("a.txt")), JSON.stringify(r.failed));
+  assert.equal(remote.puts.length, 1);
+  assert.equal(remote.mkdirCalls().length, 0);
 });
 
 test("nasPush: 폴더를 끝내 못 만들면(mkdir·list 모두 실패) 그 파일은 failed", async () => {
@@ -345,7 +350,7 @@ test("nasPush: 폴더를 끝내 못 만들면(mkdir·list 모두 실패) 그 파
   assert.ok(f.error, "error 가 있어야 함");
 });
 
-test("nasPush: 한 번 만든 부모 폴더에서 다시 403 이면 mkdir 을 반복하지 않고 failed", async () => {
+test("nasPush: 있는 폴더가 계속 403 이면 파일마다 한 번만 시도하고 failed", async () => {
   const base = mkTmp();
   mkTree(base, { "A/a1.txt": "1", "A/a2.txt": "2" });
   const remote = mkRemote({ dirs: ["/", "/Up", "/Up/A"] });
@@ -353,8 +358,8 @@ test("nasPush: 한 번 만든 부모 폴더에서 다시 403 이면 mkdir 을 �
   const r = await push(remote, { src: path.join(base, "A"), dest_path: "/Up" });
   assert.equal(r.uploaded, 0);
   for (const n of ["a1.txt", "a2.txt"]) assert.ok(r.failed.some((x) => String(x.path).endsWith(n)), `${n}: ${JSON.stringify(r.failed)}`);
-  assert.equal(remote.puts.length, 3, "첫 파일은 한 번 다시 올리고, 둘째는 다시 올리지 않는다");
-  assert.equal(remote.mkdirCalls().filter((c) => c.body.name === "A").length, 1);
+  assert.equal(remote.puts.length, 2, "파일마다 한 번씩만 올려 보고 다시 올리지 않는다");
+  assert.equal(remote.mkdirCalls().filter((c) => c.body.name === "A").length, 0, "있는 폴더는 만들러 가지 않는다");
 });
 
 test("nasPush: 그 밖의 비정상 응답·fetch 예외는 failed 에 {path, error}", async () => {
@@ -446,13 +451,15 @@ test("nasPush: 심볼릭 링크는 올리지 않고 skipped_links 로 센다", a
   assert.deepEqual(remote.puts.map((c) => c.name), ["a.txt"]);
 });
 
-test("nasPush: 같은 호출을 다시 하면 모두 skipped 로 끝난다", async () => {
+test("nasPush: 같은 호출을 다시 하면 이미 올린 파일은 본문을 다시 보내지 않고 skipped 로 끝난다", async () => {
   const base = mkTmp();
   mkTree(base, { "A/a.txt": "aa", "A/b/c.txt": "ccc" });
   const remote = mkRemote();
   const args = { src: path.join(base, "A"), dest_path: "/Up" };
   await push(remote, args);
+  const putsAfterFirst = remote.puts.length;
   const r = await push(remote, args);
+  assert.equal(remote.puts.length, putsAfterFirst, "두 번째 호출은 PUT 0건(폴더 목록의 크기로 건너뜀)");
   assert.deepEqual({ done: r.done, uploaded: r.uploaded, skipped: r.skipped, conflicts: r.conflicts, failed: r.failed },
     { done: true, uploaded: 0, skipped: 2, conflicts: [], failed: [] });
 });

@@ -158,8 +158,9 @@ export class NasIndexCache {
   build(key: string, run: () => Promise<CrawlResult>): Promise<CrawlResult> {
     const s = this.get(key);
     if (s.building) return s.building;
+    s.staleOnBuild = false; // 이전 build 가 실패해 남은 표시를 새 build 로 넘기지 않는다(그 전의 markStale 은 builtAt=null 로 이미 반영)
     const p = this.slot(run).then(
-      (r) => { s.result = r; s.builtAt = s.staleOnBuild ? null : this.now(); s.staleOnBuild = false; s.error = null; return r; },
+      (r) => { s.result = r; s.builtAt = s.staleOnBuild ? null : this.now(); s.error = null; return r; },
       (e: unknown) => { s.error = e instanceof Error ? e.message : String(e); throw e; },
     ).finally(() => { s.building = null; });
     p.catch(() => {}); // 기다리는 쪽이 없을 수 있다(첫 호출이 시간 안에 못 받고 돌아간 경우)

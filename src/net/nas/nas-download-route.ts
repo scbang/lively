@@ -12,6 +12,7 @@ import { logger } from "../../log.js";
 import { randomBytes } from "node:crypto";
 import { decodeRawPath, isSafeRawPath, displayPath, childRawPath, encodeRawPath } from "../ftp/ftp-list.js";
 import { NasConfigError, openNasSession, NAS_DOWNLOAD_PATH, NAS_UPLOAD_PATH, nasIndexCache, nasIndexKey } from "./nas-access.js";
+import { uploadAtomically } from "./nas-upload.js";
 import { FtpError } from "../ftp/ftp-client.js";
 
 // 파일명에 고객 이름이 흔해 경로 원문은 로그에 남기지 않는다. 같은 파일인지는 해시로 대조한다.
@@ -102,7 +103,8 @@ export function registerNasDownloadRoute(app: express.Express, verifier: BearerV
       const { user, via } = who;
       const dir = decodeRawPath(String(req.query.dir ?? ""));
       const target = dir ? childRawPath(dir, String(req.query.name ?? "")) : null;
-      if (!target) { req.resume(); res.status(400).json({ error: "올릴 폴더(dir)나 이름(name)이 올바르지 않습니다" }); return; }
+      const temp = dir ? childRawPath(dir, `.${randomBytes(6).toString("hex")}.lively-upload`) : null;
+      if (!target || !temp) { req.resume(); res.status(400).json({ error: "올릴 폴더(dir)나 이름(name)이 올바르지 않습니다" }); return; }
       const overwrite = req.query.overwrite === "1" || req.query.overwrite === "true";
       const declared = req.headers["content-length"] === undefined ? null : Number(req.headers["content-length"]);
 
@@ -117,23 +119,25 @@ export function registerNasDownloadRoute(app: express.Express, verifier: BearerV
         return;
       }
       const { session, username } = opened;
-      const temp = childRawPath(dir!, `.${randomBytes(6).toString("hex")}.lively-upload`)!;
-      let stored = false;
+      // 임시 파일 정리는 새 세션으로 한다 — 전송이 끊긴 세션은 이미 버려졌다(poison)
+      const cleanupTemp = async (): Promise<void> => {
+        try {
+          const { session: s2 } = await openNasSession(user.userId);
+          try { await s2.dele(temp); } finally { await s2.close(); }
+        } catch (e) {
+          if (!(e instanceof FtpError && e.code === 550)) logger.warn({ err: e instanceof Error ? e.name : "unknown", member: user.userId }, "[nas] 올리기 임시 파일 정리 실패");
+        }
+      };
       try {
-        const existing = await session.size(target);
-        if (existing !== null && !overwrite) {
+        const r = await uploadAtomically(session, { temp, target, overwrite, body: req, declared: Number.isFinite(declared) ? declared : null }, cleanupTemp);
+        if (r.kind === "exists") {
           req.resume();
-          res.status(409).json({ error: "같은 이름의 파일이 있습니다", exists: true, size: existing, path: displayPath(target), p: encodeRawPath(target) });
+          res.status(409).json({ error: "같은 이름의 파일이 있습니다", exists: true, size: r.size, path: displayPath(target), p: encodeRawPath(target) });
           return;
         }
-        const bytes = await session.stor(temp, req);
-        stored = true;
-        if (declared !== null && Number.isFinite(declared) && bytes !== declared) throw new Error(`받은 바이트(${bytes})가 선언(${declared})과 다릅니다`);
-        await session.rename(temp, target);
-        stored = false;
         nasIndexCache.markStale(nasIndexKey(user.userId, username));
-        logger.info({ member: user.userId, ftpUser: username, via, pathHash: hashPath(target), bytes, overwritten: existing !== null }, "[nas] 파일 올리기");
-        res.json({ path: displayPath(target), p: encodeRawPath(target), size: bytes, overwritten: existing !== null });
+        logger.info({ member: user.userId, ftpUser: username, via, pathHash: hashPath(target), bytes: r.bytes, overwritten: r.overwritten }, "[nas] 파일 올리기");
+        res.json({ path: displayPath(target), p: encodeRawPath(target), size: r.bytes, overwritten: r.overwritten });
       } catch (e) {
         req.resume();
         const brief = { name: e instanceof Error ? e.name : "unknown", code: e instanceof FtpError ? e.code : null, fatal: e instanceof FtpError ? e.fatal : null };
@@ -144,11 +148,6 @@ export function registerNasDownloadRoute(app: express.Express, verifier: BearerV
         }
       } finally {
         await session.close();
-        // 임시 파일을 남겼으면 새 세션으로 치운다(실패한 세션은 이미 닫혔을 수 있다)
-        if (stored) {
-          openNasSession(user.userId).then(async ({ session: s2 }) => { try { await s2.dele(temp); } finally { await s2.close(); } })
-            .catch((e) => logger.warn({ err: e instanceof Error ? e.name : "unknown", member: user.userId }, "[nas] 올리기 임시 파일 정리 실패"));
-        }
       }
     })().catch((e) => {
       logger.warn({ err: e }, "[nas] 올리기 처리 실패");
