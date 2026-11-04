@@ -7,7 +7,7 @@
 //  · MCP 호출은 하네스를 붙잡는 동기 호출이라(lively-mcp-local.mjs 머리말) 한 번에 budgetMs 만 쓰고 멈춘다. 폴더 나열도 이 예산 안이다
 //    — 폴더 하나마다 게이트웨이가 FTP 로그인부터 다시 하므로 큰 폴더는 나열만 수 분이 걸린다. 끊긴 나열은 dest 의 .nas-pull-<키>.json 에
 //    남겨 다음 호출이 이어서 나열하고, 받기는 같은 크기 파일을 건너뛰는 것으로 이어받는다. 다 받으면 그 파일을 지운다.
-import { mkdirSync, statSync, lstatSync, renameSync, unlinkSync, createWriteStream, realpathSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, statSync, lstatSync, renameSync, unlinkSync, createWriteStream, realpathSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve, dirname, basename, isAbsolute, sep } from "node:path";
 import { Readable } from "node:stream";
@@ -38,6 +38,20 @@ function realOfNearest(p) {
   let probe = p, tail = "";
   while (!existsSync(probe)) { const up = dirname(probe); if (up === probe) break; tail = tail ? join(basename(probe), tail) : basename(probe); probe = up; }
   return tail ? join(realpathSync(probe), tail) : realpathSync(probe);
+}
+
+/**
+ * 죽은 호출이 남긴 그 파일의 임시 조각(<이름>.<pid>.part)을 치운다. 이름에 pid 가 있어 다음 호출이 같은 이름을 덮지 않으므로
+ *  스스로 치워야 한다. 살아 있는 전송은 계속 쓰여 수정 시각이 새로우니 FILE_TIMEOUT_MS 보다 오래된 것만 지운다.
+ */
+function sweepStaleParts(target, now) {
+  const dir = dirname(target), base = basename(target);
+  let names;
+  try { names = readdirSync(dir); } catch { return; }
+  for (const n of names) {
+    if (!n.startsWith(base + ".") || !/^\.\d+\.part$/.test(n.slice(base.length))) continue;
+    try { const st = lstatSync(join(dir, n)); if (now() - st.mtimeMs > FILE_TIMEOUT_MS) unlinkSync(join(dir, n)); } catch { /* 경합 — 무시 */ }
+  }
 }
 
 /** 링크를 따라가지 않고 새로 만드는 쓰기 — 그 이름의 링크·잔해를 먼저 지우고 O_EXCL 로 연다(링크를 따라 밖의 파일을 덮지 않게). */
@@ -136,6 +150,7 @@ export async function pullFiles(files, destRootIn, download, { budgetMs = DEFAUL
       mkdirSync(parent, { recursive: true });
       if (!insideOrSame(realpathSync(parent), destRoot)) { await res.body.cancel().catch(() => {}); out.failed.push({ path: f.path, error: "받는 폴더 밖으로 이어지는 링크" }); continue; }
       const part = `${target}.${process.pid}.part`; // pid: 같은 폴더로 동시에 받는 두 세션이 임시 파일을 섞지 않게
+      sweepStaleParts(target, now);
       try {
         await pipeline(Readable.fromWeb(res.body), exclusiveWriteStream(part));
         renameSync(part, target);
@@ -196,7 +211,14 @@ export async function nasPull(ctx, args, { home, fetchImpl, budgetMs = DEFAULT_B
     const tmp = `${cacheFile}.${process.pid}.tmp`;
     try {
       const ws = exclusiveWriteStream(tmp); ws.end(JSON.stringify({ at: cached?.at ?? started, ...body }));
-      return new Promise((ok) => { ws.on("close", () => { try { renameSync(tmp, cacheFile); } catch { /* 다음 호출이 처음부터 */ } ok(); }); ws.on("error", () => ok()); });
+      // WriteStream 은 error 뒤에도 close 를 낸다 — 오류였으면 옮기지 말고 지운다(반쪽 JSON 이 기록이 되지 않게)
+      let broken = false;
+      ws.on("error", () => { broken = true; });
+      return new Promise((ok) => ws.on("close", () => {
+        try { if (broken) unlinkSync(tmp); else renameSync(tmp, cacheFile); }
+        catch { try { unlinkSync(tmp); } catch { /* 이미 없음 */ } }
+        ok();
+      }));
     } catch { return Promise.resolve(); /* 기록 실패는 다음 호출이 처음부터 나열할 뿐 */ }
   };
 

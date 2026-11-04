@@ -327,6 +327,18 @@ test("pullFiles: 중간 폴더가 밖을 가리키는 링크면 밖에 폴더도
   assert.equal(r.failed.length, 1);
 });
 
+test("pullFiles: 죽은 호출이 남긴 오래된 임시 조각은 치우고, 최근 것은 둔다", async () => {
+  const root = fs.realpathSync(mkTmp());
+  const old = path.join(root, "x.txt.11111.part"), fresh = path.join(root, "x.txt.22222.part");
+  fs.writeFileSync(old, "o"); fs.writeFileSync(fresh, "f");
+  const longAgo = new Date(Date.now() - 3 * 60 * 60_000);
+  fs.utimesSync(old, longAgo, longAgo);
+  await pullFiles([{ p: "x", path: "/x.txt", size: 1, rel: ["x.txt"] }], root, mkDownload({ x: "a" }), { now: Date.now });
+  assert.equal(exists(old), false);
+  assert.equal(exists(fresh), true);
+  assert.equal(read(path.join(root, "x.txt")), "a");
+});
+
 test("pullFiles: 시작부터 budgetMs 를 넘긴 뒤엔 새 파일을 시작하지 않고 remaining 에 남은 수", async () => {
   const root = mkTmp();
   let t = 1000;
