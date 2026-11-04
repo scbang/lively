@@ -116,7 +116,8 @@ export async function nasPush(ctx, args, { fetchImpl, budgetMs = DEFAULT_BUDGET_
     const shown = f.rel.join("/");
     try {
       const have = (await remoteSizes(relDir))?.get(f.rel[f.rel.length - 1].normalize("NFC"));
-      if (have !== undefined && have === f.size) { out.skipped++; continue; }
+      // 덮기를 요청했으면 크기가 같아도 올린다 — 길이만 같고 내용이 바뀐 파일이 조용히 옛 내용으로 남지 않게(그 대신 덮기 호출은 이어받기가 처음부터 다시 보낸다)
+      if (have !== undefined && have === f.size && !args.overwrite) { out.skipped++; continue; }
       if (have !== undefined && !args.overwrite) { out.conflicts.push({ path: shown, local_size: f.size, nas_size: have }); continue; }
       let res = await put(f, relDir);
       if (res.status === 403 && !ensured.has(relDir.join("/"))) {

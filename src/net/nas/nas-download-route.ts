@@ -119,7 +119,7 @@ export function registerNasDownloadRoute(app: express.Express, verifier: BearerV
         return;
       }
       const { session, username } = opened;
-      // 임시 파일 정리는 새 세션으로 한다 — 전송이 끊긴 세션은 이미 버려졌다(poison)
+      // 임시 파일 정리는 늘 새 세션으로 한다 — 전송이 끊긴 세션은 이미 버려졌고(poison), 실패 종류를 여기서 가르지 않는다
       const cleanupTemp = async (): Promise<void> => {
         try {
           const { session: s2 } = await openNasSession(user.userId);

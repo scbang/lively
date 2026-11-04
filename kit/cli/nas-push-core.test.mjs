@@ -451,6 +451,18 @@ test("nasPush: 심볼릭 링크는 올리지 않고 skipped_links 로 센다", a
   assert.deepEqual(remote.puts.map((c) => c.name), ["a.txt"]);
 });
 
+test("nasPush: overwrite 면 NAS 에 같은 이름·같은 크기 파일이 있어도 건너뛰지 않고 덮어 올린다", async () => {
+  const dir = mkTmp();
+  const file = path.join(dir, "c.txt");
+  fs.writeFileSync(file, "NEWXY");
+  const remote = mkRemote();
+  remote.files.set(pChild(UP, "c.txt"), Buffer.from("oldab"));
+  const r = await push(remote, { src: file, dest_path: "/Up", overwrite: true });
+  assert.equal(r.uploaded, 1);
+  assert.equal(r.skipped, 0);
+  assert.equal(remote.files.get(pChild(UP, "c.txt")).toString(), "NEWXY");
+});
+
 test("nasPush: 같은 호출을 다시 하면 이미 올린 파일은 본문을 다시 보내지 않고 skipped 로 끝난다", async () => {
   const base = mkTmp();
   mkTree(base, { "A/a.txt": "aa", "A/b/c.txt": "ccc" });
