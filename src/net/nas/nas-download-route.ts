@@ -1,4 +1,4 @@
-// NAS 파일 내려받기 — 사람의 브라우저(세션 쿠키)와 그 사람의 AI 세션(Bearer, lively_local_nas_pull) 둘 다 받는다.
+// NAS 파일 내려받기·올리기 — 사람의 브라우저(세션 쿠키)와 그 사람의 AI 세션(Bearer, lively_local_nas_pull·push) 둘 다 받는다.
 //
 //  AI 가 본문까지 읽는 것은 의도다 — 구성원이 자기 FTP 계정으로 열 수 있는 파일은 그 구성원의 AI 세션도 연다.
 //   볼 수 있는 범위는 그 구성원 본인 FTP 계정의 폴더 권한이 정한다(nas-access.ts — 공용·남의 계정 폴백 없음).
@@ -9,8 +9,9 @@ import { sessionOrBearer } from "../../auth/http-auth.js";
 import type { BearerVerifier } from "../../auth/bearer.js";
 import type { LivelyUser } from "../../context.js";
 import { logger } from "../../log.js";
-import { decodeRawPath, isSafeRawPath, displayPath } from "../ftp/ftp-list.js";
-import { NasConfigError, openNasSession, NAS_DOWNLOAD_PATH } from "./nas-access.js";
+import { randomBytes } from "node:crypto";
+import { decodeRawPath, isSafeRawPath, displayPath, childRawPath, encodeRawPath } from "../ftp/ftp-list.js";
+import { NasConfigError, openNasSession, NAS_DOWNLOAD_PATH, NAS_UPLOAD_PATH, nasIndexCache, nasIndexKey } from "./nas-access.js";
 import { FtpError } from "../ftp/ftp-client.js";
 
 // 파일명에 고객 이름이 흔해 경로 원문은 로그에 남기지 않는다. 같은 파일인지는 해시로 대조한다.
@@ -24,20 +25,23 @@ export function contentDisposition(display: string): string {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${ext}`;
 }
 
+// nas_find·nas_list 와 같은 권한(context) — 목록은 못 보는 토큰이 본문을 받거나 올리는 일이 없게. 실패면 응답을 보내고 null.
+function nasCaller(req: express.Request, res: express.Response): { user: LivelyUser; via: "agent" | "browser" } | null {
+  const user = (req.auth?.extra ?? null) as LivelyUser | null;
+  if (!user?.userId) { res.status(401).json({ error: "라이블리 인증이 필요합니다" }); return null; }
+  if (!Array.isArray(user.scopes) || !user.scopes.includes("context")) {
+    res.status(403).json({ error: "이 토큰으로는 NAS 파일을 다룰 수 없습니다(context 권한 필요)" });
+    return null;
+  }
+  return { user, via: req.auth?.token ? "agent" : "browser" };
+}
+
 export function registerNasDownloadRoute(app: express.Express, verifier: BearerVerifier): void {
   app.get(NAS_DOWNLOAD_PATH, sessionOrBearer(verifier), (req, res) => {
     void (async () => {
-      const user = (req.auth?.extra ?? null) as LivelyUser | null;
-      const via = req.auth?.token ? "agent" : "browser";
-      if (!user?.userId) {
-        res.status(401).json({ error: "라이블리 인증이 필요합니다" });
-        return;
-      }
-      // nas_find·nas_list 와 같은 권한(context) — 목록은 못 보는 토큰이 본문은 받는 일이 없게
-      if (!Array.isArray(user.scopes) || !user.scopes.includes("context")) {
-        res.status(403).json({ error: "이 토큰으로는 NAS 파일을 받을 수 없습니다(context 권한 필요)" });
-        return;
-      }
+      const who = nasCaller(req, res);
+      if (!who) return;
+      const { user, via } = who;
       const raw = decodeRawPath(String(req.query.p ?? ""));
       if (!raw || !isSafeRawPath(raw)) { res.status(400).json({ error: "파일 경로가 올바르지 않습니다" }); return; }
       const shown = displayPath(raw);
@@ -86,6 +90,69 @@ export function registerNasDownloadRoute(app: express.Express, verifier: BearerV
     })().catch((e) => {
       logger.warn({ err: e }, "[nas] 내려받기 처리 실패");
       if (!res.headersSent) res.status(500).json({ error: "내려받기 처리 실패" });
+    });
+  });
+
+  // 올리기 — 먼저 같은 폴더의 임시 이름으로 받고 다 받은 뒤 제 이름으로 옮긴다. 전송이 끊겨도 반쪽 파일이 제 이름으로 남지 않게.
+  //  덮기(overwrite=1)가 아니면 같은 이름이 있을 때 409 와 그 크기를 돌려준다(받는 쪽이 «이미 올림»을 가를 수 있게).
+  app.put(NAS_UPLOAD_PATH, sessionOrBearer(verifier), (req, res) => {
+    void (async () => {
+      const who = nasCaller(req, res);
+      if (!who) { req.resume(); return; }
+      const { user, via } = who;
+      const dir = decodeRawPath(String(req.query.dir ?? ""));
+      const target = dir ? childRawPath(dir, String(req.query.name ?? "")) : null;
+      if (!target) { req.resume(); res.status(400).json({ error: "올릴 폴더(dir)나 이름(name)이 올바르지 않습니다" }); return; }
+      const overwrite = req.query.overwrite === "1" || req.query.overwrite === "true";
+      const declared = req.headers["content-length"] === undefined ? null : Number(req.headers["content-length"]);
+
+      let opened: Awaited<ReturnType<typeof openNasSession>>;
+      try {
+        opened = await openNasSession(user.userId);
+      } catch (e) {
+        req.resume();
+        const status = e instanceof NasConfigError ? e.status : 502;
+        if (!(e instanceof NasConfigError)) logger.warn({ err: e, member: user.userId }, "[nas] 올리기 접속 실패");
+        res.status(status).json({ error: e instanceof NasConfigError ? e.message : "NAS 에 접속하지 못했습니다" });
+        return;
+      }
+      const { session, username } = opened;
+      const temp = childRawPath(dir!, `.${randomBytes(6).toString("hex")}.lively-upload`)!;
+      let stored = false;
+      try {
+        const existing = await session.size(target);
+        if (existing !== null && !overwrite) {
+          req.resume();
+          res.status(409).json({ error: "같은 이름의 파일이 있습니다", exists: true, size: existing, path: displayPath(target), p: encodeRawPath(target) });
+          return;
+        }
+        const bytes = await session.stor(temp, req);
+        stored = true;
+        if (declared !== null && Number.isFinite(declared) && bytes !== declared) throw new Error(`받은 바이트(${bytes})가 선언(${declared})과 다릅니다`);
+        await session.rename(temp, target);
+        stored = false;
+        nasIndexCache.markStale(nasIndexKey(user.userId, username));
+        logger.info({ member: user.userId, ftpUser: username, via, pathHash: hashPath(target), bytes, overwritten: existing !== null }, "[nas] 파일 올리기");
+        res.json({ path: displayPath(target), p: encodeRawPath(target), size: bytes, overwritten: existing !== null });
+      } catch (e) {
+        req.resume();
+        const brief = { name: e instanceof Error ? e.name : "unknown", code: e instanceof FtpError ? e.code : null, fatal: e instanceof FtpError ? e.fatal : null };
+        logger.warn({ ...brief, member: user.userId, via, pathHash: hashPath(target) }, "[nas] 올리기 실패");
+        if (!res.headersSent) {
+          const denied = e instanceof FtpError && (e.code === 550 || e.code === 553);
+          res.status(denied ? 403 : 502).json({ error: denied ? "그 폴더에 올릴 수 없습니다(없거나 내 계정에 쓰기 권한이 없습니다)" : "올리지 못했습니다" });
+        }
+      } finally {
+        await session.close();
+        // 임시 파일을 남겼으면 새 세션으로 치운다(실패한 세션은 이미 닫혔을 수 있다)
+        if (stored) {
+          openNasSession(user.userId).then(async ({ session: s2 }) => { try { await s2.dele(temp); } finally { await s2.close(); } })
+            .catch((e) => logger.warn({ err: e instanceof Error ? e.name : "unknown", member: user.userId }, "[nas] 올리기 임시 파일 정리 실패"));
+        }
+      }
+    })().catch((e) => {
+      logger.warn({ err: e }, "[nas] 올리기 처리 실패");
+      if (!res.headersSent) res.status(500).json({ error: "올리기 처리 실패" });
     });
   });
 }

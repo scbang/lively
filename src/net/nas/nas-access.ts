@@ -61,6 +61,8 @@ export const nasIndexCache = new NasIndexCache();
 export const nasIndexKey = (memberId: string, username: string): string => `${currentTenant()?.id ?? "_"}\u0000${memberId}\u0000${username}`;
 
 export const NAS_DOWNLOAD_PATH = "/api/ui/me/nas/file";
+/** 올리기 — PUT, 쿼리 dir(폴더 p)·name(새 이름, UTF-8)·overwrite(1 이면 덮기). 본문은 파일 바이트 그대로. */
+export const NAS_UPLOAD_PATH = "/api/ui/me/nas/upload";
 
 /** 사람이 브라우저에서 여는 내려받기 경로(게이트웨이 기준 상대). 절대 주소는 호출부가 붙인다. */
 export function nasDownloadPath(raw: string): string {

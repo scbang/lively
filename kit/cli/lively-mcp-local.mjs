@@ -338,6 +338,36 @@ registerTool({
   },
 });
 
+// NAS 로 올리기 — 이 기계의 파일·폴더를 NAS 폴더로. 본체는 nas-push-core.mjs(dynamic import 인 이유는 nas_pull 과 같다).
+registerTool({
+  name: "lively_local_nas_push",
+  title: "이 기계의 파일·폴더를 NAS 로 올리기",
+  description: "로컬 파일이나 폴더를 NAS(본인 FTP 계정 권한)의 폴더로 올린다. 폴더는 그 이름부터 하위 구조를 유지하고 필요한 NAS 폴더를 만든다. "
+    + "dest_p 는 nas_find·nas_list 결과의 폴더 p(또는 dest_path 에 사람이 읽는 경로). 같은 이름 파일이 NAS 에 있으면 덮지 않는다 — "
+    + "크기가 같으면 이미 올린 것으로 세고, 다르면 conflicts 로 알린다(덮으려면 사람 확인 뒤 overwrite:true). 로컬 링크는 따라가지 않는다. "
+    + "한 번에 약 50초만 올리고 멈추므로 응답의 done 이 false 면 같은 호출을 다시 한다. 폴더 만들기·지우기·이름 바꾸기는 nas_manage.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      src: { type: "string", description: "올릴 로컬 파일·폴더(절대 경로 또는 작업 폴더 기준 상대 경로)" },
+      dest_p: { type: "string", description: "올릴 NAS 폴더의 p(nas_find·nas_list 결과)" },
+      dest_path: { type: "string", description: "dest_p 대신 NAS 폴더 경로(사람이 읽는 꼴, 예: /SME금융/02. 사후관리)" },
+      overwrite: { type: "boolean", description: "true 면 같은 이름 파일을 덮는다(기본 false — 사람 확인 뒤에만)" },
+    },
+    required: ["src"],
+    additionalProperties: false,
+  },
+  handler: async (args, ctx) => {
+    let nasPush;
+    try { ({ nasPush } = await import("./nas-push-core.mjs")); }
+    catch (e) {
+      if (e?.code !== "ERR_MODULE_NOT_FOUND") throw e;
+      throw new Error("NAS 올리기 모듈(nas-push-core.mjs)이 이 설치에 없습니다 — `lively update` 로 키트를 갱신한 뒤 새 세션에서 다시 하세요");
+    }
+    return ctx.json(await nasPush(ctx, args, { fetchImpl: fetch }));
+  },
+});
+
 registerTool({
   name: "lively_local_repo_pin_remove",
   title: "핀 제거",

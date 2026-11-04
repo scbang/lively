@@ -2,7 +2,7 @@
 //
 //  왜 구성원마다 따로 색인하나: NAS 는 FTP 계정마다 열린 폴더가 다르다(예: vsftpd 가상 사용자마다 팀 폴더를 bind mount).
 //   한 사람 색인을 다른 사람 검색에 쓰면 그 사람이 못 여는 폴더의 파일 이름이 새어 나간다. 그래서 캐시 키가 구성원이다.
-//  본문: 이 색인은 파일 이름만 다룬다. 본문은 내려받기 경로(nas-download-route.ts)로만 오가고,
+//  본문: 이 색인은 파일 이름만 다룬다. 본문은 내려받기·올리기 경로(nas-download-route.ts)로만 오가고,
 //   거기서도 볼 수 있는 범위는 그 구성원 본인 FTP 계정 권한이다.
 import { parseListing, displayPath, type FtpListEntry } from "../ftp/ftp-list.js";
 
@@ -110,6 +110,8 @@ export interface IndexState {
   result: CrawlResult | null;
   building: Promise<CrawlResult> | null;
   error: string | null;
+  /** 색인을 만드는 도중 NAS 가 바뀌었다 — 그 색인은 완성돼도 낡은 것으로 본다. */
+  staleOnBuild?: boolean;
 }
 
 export const INDEX_TTL_MS = 12 * 60 * 60_000;
@@ -157,7 +159,7 @@ export class NasIndexCache {
     const s = this.get(key);
     if (s.building) return s.building;
     const p = this.slot(run).then(
-      (r) => { s.result = r; s.builtAt = this.now(); s.error = null; return r; },
+      (r) => { s.result = r; s.builtAt = s.staleOnBuild ? null : this.now(); s.staleOnBuild = false; s.error = null; return r; },
       (e: unknown) => { s.error = e instanceof Error ? e.message : String(e); throw e; },
     ).finally(() => { s.building = null; });
     p.catch(() => {}); // 기다리는 쪽이 없을 수 있다(첫 호출이 시간 안에 못 받고 돌아간 경우)
@@ -166,6 +168,14 @@ export class NasIndexCache {
   }
 
   drop(key: string): void { this.states.delete(key); }
+
+  /** NAS 를 바꾼 뒤 부른다 — 다음 검색이 색인을 다시 만든다(그동안은 직전 색인으로 답한다). */
+  markStale(key: string): void {
+    const s = this.states.get(key);
+    if (!s) return;
+    s.builtAt = null;
+    if (s.building) s.staleOnBuild = true;
+  }
 
   // 상한은 키 수로 센다. 진행 중인 키는 버리지 않으므로 잠깐 넘을 수 있다(동시 색인 수만큼).
   // keep = 방금 넣은 키. 아직 builtAt 이 없어 «가장 오래된 것»으로 보이지만, 곧 색인을 만들 자리라 버리면 안 된다.

@@ -8,7 +8,7 @@ import { HttpError } from "./rest-util.js";
 import { logger } from "../log.js";
 import { gatewayUrl } from "../gateway-url.js";
 import { FtpError } from "../net/ftp/ftp-client.js";
-import { parseListing, displayPath, encodeRawPath, decodeRawPath, isSafeRawPath } from "../net/ftp/ftp-list.js";
+import { parseListing, displayPath, encodeRawPath, decodeRawPath, isSafeRawPath, rawOfDisplayPath, childRawPath, parentRawPath } from "../net/ftp/ftp-list.js";
 import { crawl, searchEntries, type NasEntry, type CrawlResult } from "../net/nas/nas-index.js";
 import { NasConfigError, openNasSession, resolveNasLogin, resolveNasServer, nasIndexCache, nasIndexKey, nasDownloadPath } from "../net/nas/nas-access.js";
 
@@ -141,15 +141,8 @@ const nasList: Capability = {
   handler: async (input, user) => {
     if (!user?.userId) throw new HttpError(401, "인증이 필요합니다");
     const i = z.object(listInput).parse(input ?? {});
-    let raw: string | null;
-    if (i.p) raw = decodeRawPath(i.p);
-    else {
-      const path = (i.path ?? "/").trim() || "/";
-      raw = Buffer.from(path.startsWith("/") ? path : `/${path}`, "utf8").toString("latin1");
-    }
-    if (raw && raw.length > 1) raw = raw.replace(/\/+$/, "");
-    if (!raw || !isSafeRawPath(raw)) throw new HttpError(400, "폴더 경로가 올바르지 않습니다");
-    const dir = raw;
+    const dir = rawTarget(i.p, i.path ?? "/");
+    if (!dir) throw new HttpError(400, "폴더 경로가 올바르지 않습니다");
     let body: string;
     try {
       const { session } = await openNasSession(user.userId);
@@ -164,4 +157,79 @@ const nasList: Capability = {
   },
 };
 
-export const nasFileCapabilities: Capability[] = [nasFind, nasList];
+// p(서버가 준 원본 경로) 가 있으면 그것, 없으면 사람이 읽는 경로(UTF-8). 끝 / 는 뗀다. 쓸 수 없는 경로면 null.
+function rawTarget(p: string | undefined, path: string | undefined): string | null {
+  let raw = p ? decodeRawPath(p) : path !== undefined ? rawOfDisplayPath(path) : null;
+  if (raw && raw.length > 1) raw = raw.replace(/\/+$/, "");
+  return raw && isSafeRawPath(raw) ? raw : null;
+}
+
+// 쓰기 실패의 서버 응답을 사람 말로. 550 은 «없음»과 «권한 없음»을 vsftpd 가 가르지 않는다.
+function rethrowWrite(e: unknown, memberId: string): never {
+  if (e instanceof FtpError && e.code === 550) throw new HttpError(403, "대상이 없거나 내 FTP 계정에 그 작업 권한이 없습니다");
+  if (e instanceof FtpError && e.code === 553) throw new HttpError(400, "이 이름은 쓸 수 없습니다");
+  return rethrow(e, memberId);
+}
+
+const manageInput = {
+  op: z.enum(["mkdir", "delete", "rmdir", "rename"]).describe("mkdir=폴더 만들기 · delete=파일 지우기 · rmdir=빈 폴더 지우기 · rename=이름 바꾸기·옮기기"),
+  p: z.string().max(4096).optional().describe("대상 — nas_find·nas_list 결과의 p. mkdir 이면 새 폴더를 만들 부모 폴더"),
+  path: z.string().max(1024).optional().describe("p 대신 사람이 읽는 경로(UTF-8 이름만). p 가 있으면 p 가 우선"),
+  name: z.string().max(255).optional().describe("mkdir 의 새 폴더 이름"),
+  to_dir: z.string().max(4096).optional().describe("rename: 옮길 폴더의 p(생략하면 같은 폴더)"),
+  to_name: z.string().max(255).optional().describe("rename: 새 이름(생략하면 그 이름 그대로 to_dir 로 옮긴다)"),
+};
+
+const nasManage: Capability = {
+  name: "nas_manage",
+  title: "NAS 파일·폴더 조작",
+  description:
+    "NAS(FTP)에서 폴더 만들기·파일 지우기·빈 폴더 지우기·이름 바꾸기/옮기기를 한다. 내 FTP 계정 권한 안에서만 된다. " +
+    "되돌릴 수 없는 작업(delete·rmdir·덮는 rename)은 사람에게 대상을 확인받고 부른다. 파일 올리기는 lively_local_nas_push.",
+  scope: "context",
+  mutates: true,
+  input: manageInput,
+  expose: { mcp: true, rest: [{ method: "POST", paths: ["/api/ui/me/nas/manage"], parse: (req) => req.body ?? {} }] },
+  handler: async (input, user) => {
+    if (!user?.userId) throw new HttpError(401, "인증이 필요합니다");
+    const i = z.object(manageInput).parse(input ?? {});
+    const memberId = user.userId;
+    const raw = rawTarget(i.p, i.path);
+    if (!raw) throw new HttpError(400, "대상 경로(p 또는 path)가 올바르지 않습니다");
+    let target = raw;
+    if (i.op === "mkdir") {
+      const child = i.name ? childRawPath(raw, i.name) : null;
+      if (!child) throw new HttpError(400, "새 폴더 이름(name)이 올바르지 않습니다");
+      target = child;
+    } else if (i.op === "rename") {
+      if (raw === "/") throw new HttpError(400, "맨 위 폴더는 옮길 수 없습니다");
+      if (!i.to_dir && !i.to_name) throw new HttpError(400, "rename 은 to_dir 이나 to_name 이 필요합니다");
+      const toParent = i.to_dir ? rawTarget(i.to_dir, undefined) : parentRawPath(raw);
+      if (!toParent) throw new HttpError(400, "옮길 폴더(to_dir)가 올바르지 않습니다");
+      // 새 이름이 없으면 원래 이름의 원본 바이트를 그대로 쓴다(옛 EUC-KR 이름도 깨지지 않게)
+      const moved = i.to_name ? childRawPath(toParent, i.to_name) : `${toParent.replace(/\/+$/, "")}/${raw.slice(raw.lastIndexOf("/") + 1)}`;
+      if (!moved || !isSafeRawPath(moved)) throw new HttpError(400, "새 이름(to_name)이 올바르지 않습니다");
+      if (moved === raw) throw new HttpError(400, "같은 자리로는 옮길 수 없습니다");
+      target = moved;
+    } else if (raw === "/") {
+      throw new HttpError(400, "맨 위 폴더는 지울 수 없습니다");
+    }
+    let username: string;
+    try {
+      const { session, username: u } = await openNasSession(memberId);
+      username = u;
+      try {
+        if (i.op === "mkdir") await session.mkd(target);
+        else if (i.op === "delete") await session.dele(raw);
+        else if (i.op === "rmdir") await session.rmd(raw);
+        else await session.rename(raw, target);
+      } finally { await session.close(); }
+    } catch (e) { rethrowWrite(e, memberId); }
+    nasIndexCache.markStale(nasIndexKey(memberId, username));
+    logger.info({ member: memberId, ftpUser: username, op: i.op }, "[nas] 파일 조작");
+    const shown = i.op === "delete" || i.op === "rmdir" ? raw : target;
+    return { ok: true, op: i.op, path: displayPath(shown), p: encodeRawPath(shown), ...(i.op === "rename" ? { from: displayPath(raw) } : {}) };
+  },
+};
+
+export const nasFileCapabilities: Capability[] = [nasFind, nasList, nasManage];
