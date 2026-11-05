@@ -14,6 +14,8 @@ import { NasConfigError, openNasSession, resolveNasLogin, resolveNasServer, nasI
 
 /** 첫 색인을 기다리는 최대 시간. 넘으면 «만드는 중»으로 답하고 색인은 뒤에서 계속 만든다(MCP 호출을 오래 붙잡지 않게). */
 export const FIRST_INDEX_WAIT_MS = 20_000;
+/** 색인 하나를 만들 때 여는 FTP 세션 수. 동시 색인 수(INDEX_MAX_CONCURRENT_BUILDS)와 곱한 만큼 NAS 에 접속이 열린다. */
+export const NAS_CRAWL_SESSIONS = 4;
 
 const BODY_NOTE = "파일 내용이 필요하면 항목(p·path·type·size)을 lively_local_nas_pull 의 targets 로 넘겨 ~/NAS사본 아래로 받은 뒤 연다. 프로젝트 공유 폴더에는 받지 않는다(다른 구성원도 본다). download_url 은 사람이 브라우저로 받는 링크다.";
 
@@ -88,13 +90,17 @@ const nasFind: Capability = {
     const key = nasIndexKey(memberId, username);
     if (i.refresh || !nasIndexCache.isFresh(key)) {
       const building = nasIndexCache.build(key, async () => {
-        const { session } = await openNasSession(memberId);
+        const started = Date.now();
+        // 첫 세션은 자격 오류(530)를 그대로 올려야 해서 따로 연다. 나머지는 열리는 만큼만 쓴다 — 못 열려도 느려질 뿐 색인은 된다.
+        const first = (await openNasSession(memberId)).session;
+        const extra = await Promise.allSettled(Array.from({ length: NAS_CRAWL_SESSIONS - 1 }, () => openNasSession(memberId)));
+        const sessions = [first, ...extra.flatMap((x) => (x.status === "fulfilled" ? [x.value.session] : []))];
         try {
-          const r = await crawl((dir) => session.list(dir));
-          logger.info({ member: memberId, dirs: r.dirs, entries: r.entries.length, failedDirs: r.failedDirs, truncated: r.truncated }, "[nas] 파일명 색인 완료");
+          const r = await crawl(sessions.map((s) => (dir: string) => s.list(dir)));
+          logger.info({ member: memberId, dirs: r.dirs, entries: r.entries.length, failedDirs: r.failedDirs, truncated: r.truncated, sessions: sessions.length, ms: Date.now() - started }, "[nas] 파일명 색인 완료");
           return r;
         } finally {
-          await session.close();
+          await Promise.allSettled(sessions.map((s) => s.close()));
         }
       });
       const state = nasIndexCache.get(key);
