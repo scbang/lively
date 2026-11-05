@@ -46,7 +46,7 @@ const isFatal = (e: unknown): boolean => (e as { fatal?: unknown } | null)?.fata
 /**
  * root 아래를 너비 우선으로 훑는다. 심볼릭 링크는 따라가지 않는다(순환·chroot 밖 방지).
  *  lister 를 여러 개 주면 한 큐를 나눠 동시에 연다(FTP 세션 하나는 LIST 를 하나씩만 하므로 세션마다 lister 하나).
- *  LIST 한 번은 대부분 왕복 지연이라, 세션 수만큼 빨라진다.
+ *  왕복 지연이 LIST 시간을 지배하면 최대 세션 수만큼 빨라진다(실제 속도는 색인 완료 로그의 sessions·ms).
  *  한 lister 의 접속이 죽으면(fatal) 그 폴더를 큐에 되돌리고 나머지 lister 로 계속한다. 전부 죽으면 마지막 오류로 거부한다 —
  *  죽은 접속의 실패를 «권한 없는 폴더»로 세면 반쪽 색인이 성공으로 12시간 캐시된다.
  */
@@ -99,10 +99,11 @@ export async function crawl(listers: DirLister | readonly DirLister[], root = "/
       inflight--;
       for (const it of items) {
         if (it.type !== "file" && it.type !== "dir") continue;
+        // 넣기 전에 본다 — 다른 lister 가 이미 상한을 채웠으면 이 폴더 결과도 더 넣지 않는다
+        if (entries.length >= limits.maxEntries) break;
         const raw = joinRaw(dir, it.name);
         entries.push({ raw, path: displayPath(raw), type: it.type, size: it.size, mtime: it.mtime });
         if (it.type === "dir") queue.push(raw);
-        if (entries.length >= limits.maxEntries) break;
       }
       if (entries.length >= limits.maxEntries) truncated ??= `항목 ${limits.maxEntries}개 상한`;
       wakeAll();

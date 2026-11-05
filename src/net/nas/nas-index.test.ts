@@ -209,6 +209,13 @@ await t("crawl: lister 여러 개여도 maxDirs 를 넘겨 열지 않고 truncat
   assert.match(r.truncated ?? "", /폴더 10개 상한/);
 });
 
+await t("crawl: lister 여러 개여도 maxEntries 를 넘겨 담지 않는다", async () => {
+  const pool = poolFs(DEEP, 4);
+  const r = await crawl(pool.listers, "/", { ...NO_LIMITS, maxEntries: 15 });
+  assert.equal(r.entries.length, 15);
+  assert.match(r.truncated ?? "", /항목 15개 상한/);
+});
+
 await t("crawl: lister 가 없으면 거부된다", async () => {
   await assert.rejects(() => crawl([], "/", NO_LIMITS));
 });

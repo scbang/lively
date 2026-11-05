@@ -95,6 +95,9 @@ const nasFind: Capability = {
         const first = (await openNasSession(memberId)).session;
         const extra = await Promise.allSettled(Array.from({ length: NAS_CRAWL_SESSIONS - 1 }, () => openNasSession(memberId)));
         const sessions = [first, ...extra.flatMap((x) => (x.status === "fulfilled" ? [x.value.session] : []))];
+        const rejected = extra.filter((x): x is PromiseRejectedResult => x.status === "rejected");
+        // 보조 세션이 다 막히면 한 세션 속도로 떨어져 시간 상한에 걸린다 — 잘린 까닭을 로그에서 찾을 수 있게 남긴다
+        if (rejected.length) logger.warn({ member: memberId, failed: rejected.length, err: rejected[0].reason }, "[nas] 보조 FTP 세션 열기 실패");
         try {
           const r = await crawl(sessions.map((s) => (dir: string) => s.list(dir)));
           logger.info({ member: memberId, dirs: r.dirs, entries: r.entries.length, failedDirs: r.failedDirs, truncated: r.truncated, sessions: sessions.length, ms: Date.now() - started }, "[nas] 파일명 색인 완료");
